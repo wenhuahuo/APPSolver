@@ -1,0 +1,53 @@
+outputs/
+datasets/
+runs/
+logs/
+artifacts/
+tmp/
+tmp/
+docs/
+vis/
+.ai_context/
+**/*.sh
+
+# checkpoints
+**/checkpoints/
+**/checkpoint/
+**/*.ckpt
+**/*.pt
+**/*.pth
+**/*.onnx
+**/*.bin
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# packaging
+*.egg-info/
+*.egg
+dist/
+build/
+
+# virtual environments
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.vscode/
+.idea/
+
+# secrets
+.env
+.env.*
+*.pem
+*.key
