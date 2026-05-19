@@ -56,7 +56,7 @@ class PatchEmbeddingWithEmbedding(nn.Module):
         return x_proj
 
 
-class PatchTransformerWithEmbedding(nn.Module):
+class TransformerWithEmbedding(nn.Module):
     """
     Simple Transformer with pre-computed parameter embedding.
     No LLM code - embeddings must be pre-computed.

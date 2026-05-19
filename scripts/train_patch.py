@@ -1,5 +1,5 @@
 """
-Train Patch Models (PatchTransformer / DPT)
+Train Patch Models (Transformer / DPT)
 
 Supports single-condition and multi-condition training.
 Use --multi_condition to enable multi-condition mode.
@@ -43,7 +43,7 @@ from src.datasets.cfdBench import (
     CFDBenchPatchDataset,
     MultiConditionCFDBenchPatchDataset,
 )
-from src.models.patch import PatchTransformer, PatchTransformerLoss, DPT, DPTLoss
+from src.models.patch import Transformer, TransformerLoss, DPT, DPTLoss
 from src.core.metrics import patches_to_points, MetricsCalculator
 
 
@@ -590,7 +590,7 @@ def main():
     # Model
     # ------------------------------------------------------------------ #
     if args.model == 'transformer':
-        model = PatchTransformer(
+        model = Transformer(
             in_flattened_dim=in_flattened_dim,
             out_flattened_dim=out_flattened_dim,
             d_model=args.d_model,
@@ -615,7 +615,7 @@ def main():
     print(f"Model params: {n_params:,} total / {n_train:,} trainable")
 
     if args.model == 'transformer':
-        criterion = PatchTransformerLoss(use_mask=True)
+        criterion = TransformerLoss(use_mask=True)
     else:
         criterion = DPTLoss()
 

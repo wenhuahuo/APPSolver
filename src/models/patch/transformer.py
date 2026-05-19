@@ -1,5 +1,5 @@
 """
-Simple Transformer for Patch-based Flow Field Prediction
+Simple Transformer for patch-based flow field prediction.
 
 Input shape: [B, P, N*C_in] where:
 - B: batch size
@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class PatchTransformer(nn.Module):
+class Transformer(nn.Module):
     """
     Unified Transformer for patch-based flow field prediction.
     
@@ -116,7 +116,7 @@ class PatchTransformer(nn.Module):
                 if params_embed.shape[-1] != self.d_model:
                     raise ValueError(
                         f"params_embed dim {params_embed.shape[-1]} does not match "
-                        f"d_model {self.d_model}; initialize PatchTransformer with params_dim."
+                        f"d_model {self.d_model}; initialize Transformer with params_dim."
                     )
             else:
                 if params_embed.shape[-1] != self.params_dim:
@@ -138,7 +138,7 @@ class PatchTransformer(nn.Module):
         return x_out
 
 
-class PatchTransformerLoss(nn.Module):
+class TransformerLoss(nn.Module):
     """MSE loss with optional mask support."""
     
     def __init__(self, use_mask: bool = True):
@@ -172,7 +172,7 @@ if __name__ == '__main__':
     in_flattened_dim = NC
     out_flattened_dim = NC // 2
     
-    model = PatchTransformer(
+    model = Transformer(
         in_flattened_dim=in_flattened_dim,
         out_flattened_dim=out_flattened_dim,
         d_model=128,
