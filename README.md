@@ -6,6 +6,18 @@ This repository accompanies the paper:
 
 APPSolver formulates ship flow field prediction as a one-step temporal advancement task on the original unstructured CFD mesh. The core idea is Adaptive Patch Partitioning (APP), which converts non-uniform free-surface points into patch tokens, then predicts the next-step point-wise flow field with a Transformer-based backbone and condition tokens.
 
+## Method Overview
+
+APPSolver partitions irregular CFD mesh points into adaptive patches, encodes patch-wise flow tokens with condition embeddings, and predicts the next-step point-wise flow field on the original mesh.
+
+Architecture overview ([PDF source](pics/arch.pdf)):
+
+[![APPSolver architecture](pics/arch.png)](pics/arch.pdf)
+
+Qualitative APP-Transformer prediction result:
+
+![APP-Transformer qualitative result](pics/qualitative_app_transformer_uvwp.png)
+
 ## Repository Structure
 
 ```text
@@ -58,11 +70,9 @@ pip install torch==2.8.0+cu128 --index-url https://download.pytorch.org/whl/cu12
 pip install -r requirements.txt
 ```
 
-## Dataset Layout
+## Dataset Prepare
 
-This README uses DTC 1Re as the minimal example.
-
-Expected layout:
+You can download our ShipBench dataset via [Baidu Drive](https://pan.baidu.com/s/1DVz_6-_rM2jfzSNlO7deBg?pwd=c29d2). Then extract file in workdir, it should looks like this:
 
 ```text
 datasets/
@@ -71,15 +81,43 @@ datasets/
         └── field/
             └── 1Re/
                 ├── flow_cache.npz
-                ├── ship_params_DTC.yaml
+                ├── timestep_000.csv
                 └── ...
+```
+
+Our Method can be also trained on CFDBench Raw Data. You can download the CFDBench dataset via [CFDBench](https://github.com/luo-yining/CFDBench). The dataset should looks likes below:
+
+```text
+datasets/
+└── cfdBench/
+    └── 01_cavityflow/
+        └── case0/
+            ├── cfd_params.yaml (this can be generated through the interpolated CFDBench data but a little complex, you can skip it)
+            ├── data0-0001.txt
+            ├── data0-0002.txt
+            ├── ...
+            ├── data0-0028.txt
+            └── flow_cache.npz
 ```
 
 ## Quick Start
 
 All commands below should be run from the project root.
 
-### 1. Precompute LLM condition embeddings
+### 1. Build flow caches
+
+Build `flow_cache.npz` from raw ShipBench `timestep_*.csv` files and CFDBench `data*.txt` files. The script automatically discovers valid dataset directories under the given roots.
+
+```bash
+python scripts/build_flow_cache.py \
+  --dataset all \
+  --ship-root datasets/shipBench \
+  --cfd-root datasets/cfdBench
+```
+
+This generates `flow_cache.npz` in each discovered data directory. Add `--overwrite` if you need to rebuild existing cache files.
+
+### 2. Precompute LLM condition embeddings
 
 ```bash
 python scripts/precompute_ship_embeddings.py \
@@ -90,7 +128,7 @@ python scripts/precompute_ship_embeddings.py \
 
 This generates `ship_params_embedding.pt` under the condition directory.
 
-### 2. Train APP-Transformer
+### 3. Train APP-Transformer
 
 ```bash
 python scripts/train_patch.py \
@@ -117,7 +155,7 @@ python scripts/train_patch.py \
   --save_dir outputs/quickstart/transformer
 ```
 
-### 3. Train DPT
+### 4. Train DPT
 
 ```bash
 python scripts/train_patch.py \
@@ -146,12 +184,4 @@ python scripts/train_patch.py \
 
 ## Citation
 
-If you find this repository useful, please cite the paper:
-
-```bibtex
-@article{appsolver2026,
-  title={APPSolver: Adaptive Patch Partitioning for Point-Wise Ship Flow Prediction on Unstructured Meshes},
-  author={Anonymous Author(s)},
-  year={2026}
-}
-```
+As my first paper, I want to summit it on arXiv, but I haven’t been endorsed by arXiv yet :melting_face: .
