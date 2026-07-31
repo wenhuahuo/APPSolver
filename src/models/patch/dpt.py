@@ -41,6 +41,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional, Tuple
 
+from .condition_encoders import build_condition_encoder
+
 
 # ============================================================
 # 1.  Transformer building blocks
@@ -113,16 +115,24 @@ class PatchEmbedding(nn.Module):
     """
 
     def __init__(self, flattened_dim: int, d_model: int, max_patches: int = 1024,
-                 dropout: float = 0.0, params_dim: Optional[int] = None):
+                 dropout: float = 0.0, params_dim: Optional[int] = None,
+                 condition_encoder: str = 'token'):
         super().__init__()
         self.proj    = nn.Linear(flattened_dim, d_model)
         self.params_dim = params_dim
-        if params_dim is None:
-            self.params_proj = None
-        elif params_dim == d_model:
-            self.params_proj = nn.Identity()
-        else:
-            self.params_proj = nn.Linear(params_dim, d_model)
+        self.condition_encoder_type = condition_encoder
+        self.params_proj = None
+        self.condition_module = None
+        if params_dim is not None:
+            if condition_encoder == 'token':
+                self.params_proj = (
+                    nn.Identity() if params_dim == d_model
+                    else nn.Linear(params_dim, d_model)
+                )
+            else:
+                self.condition_module = build_condition_encoder(
+                    condition_encoder, params_dim, d_model
+                )
         self.pos_emb = nn.Parameter(torch.zeros(1, max_patches, d_model))
         nn.init.trunc_normal_(self.pos_emb, std=0.02)
         self.drop    = nn.Dropout(dropout)
@@ -147,21 +157,22 @@ class PatchEmbedding(nn.Module):
         if params_embed is not None:
             if params_embed.dim() == 1:
                 params_embed = params_embed.unsqueeze(0)
-            if self.params_proj is None:
-                if params_embed.shape[-1] != self.d_model:
-                    raise ValueError(
-                        f"params_embed dim {params_embed.shape[-1]} does not match "
-                        f"d_model {self.d_model}; initialize DPT with params_dim."
-                    )
+            if self.params_dim is None or params_embed.shape[-1] != self.params_dim:
+                raise ValueError(
+                    f"params_embed dim {params_embed.shape[-1]} does not match "
+                    f"configured params_dim {self.params_dim}."
+                )
+
+            if self.condition_encoder_type == 'film':
+                gamma, beta = self.condition_module(params_embed)
+                x = x * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
             else:
-                if params_embed.shape[-1] != self.params_dim:
-                    raise ValueError(
-                        f"params_embed dim {params_embed.shape[-1]} does not match "
-                        f"configured params_dim {self.params_dim}."
-                    )
-                params_embed = self.params_proj(params_embed)
-            params_embed = params_embed.unsqueeze(1)  # (B, 1, d_model)
-            x = torch.cat([params_embed, x], dim=1)
+                condition_token = (
+                    self.params_proj(params_embed)
+                    if self.condition_encoder_type == 'token'
+                    else self.condition_module(params_embed)
+                )
+                x = torch.cat([condition_token.unsqueeze(1), x], dim=1)
 
         return x
 
@@ -453,6 +464,7 @@ class DPT(nn.Module):
         hooks:         Optional[List[int]] = None,
         max_patches:   int   = 1024,
         params_dim:    Optional[int] = None,
+        condition_encoder: str = 'token',
     ):
         super().__init__()
         if out_flattened_dim is None:
@@ -462,12 +474,14 @@ class DPT(nn.Module):
         self.out_flattened_dim = out_flattened_dim
         self.d_model       = d_model
         self.params_dim    = params_dim
+        self.condition_encoder_type = condition_encoder
 
         # ── Encoder ──────────────────────────────────────────
         self.patch_embed = PatchEmbedding(in_flattened_dim, d_model,
                                           max_patches=max_patches,
                                           dropout=dropout,
-                                          params_dim=params_dim)
+                                          params_dim=params_dim,
+                                          condition_encoder=condition_encoder)
         self.encoder = ViTEncoder(d_model, n_heads, n_layers,
                                   mlp_ratio=mlp_ratio, dropout=dropout,
                                   hooks=hooks)

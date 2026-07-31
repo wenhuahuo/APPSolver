@@ -43,8 +43,15 @@ from src.datasets.cfdBench import (
     CFDBenchPatchDataset,
     MultiConditionCFDBenchPatchDataset,
 )
-from src.models.patch import Transformer, TransformerLoss, DPT, DPTLoss
-from src.core.metrics import patches_to_points, MetricsCalculator
+from src.models.patch import (
+    DPT,
+    DPTLoss,
+    LearnedPatchTransformer,
+    Transformer,
+    TransformerLoss,
+)
+from src.core.metrics import patches_to_points, recover_points_knn, MetricsCalculator
+from src.datasets.temporal import save_data_protocol
 
 
 # ---------------------------------------------------------------------------
@@ -77,8 +84,9 @@ def _init_metrics_csv(csv_path):
             f,
             fieldnames=[
                 'mode', 'epoch', 'step', 'train_loss',
-                'val_loss', 'mae', 'mse', 'rmse', 'elapsed_sec'
-            ]
+                'val_loss', 'mae', 'mse', 'rmse', 'relative_l2', 'elapsed_sec'
+            ],
+            extrasaction='ignore',
         )
         writer.writeheader()
 
@@ -89,8 +97,9 @@ def _append_metrics_csv(csv_path, row):
             f,
             fieldnames=[
                 'mode', 'epoch', 'step', 'train_loss',
-                'val_loss', 'mae', 'mse', 'rmse', 'elapsed_sec'
-            ]
+                'val_loss', 'mae', 'mse', 'rmse', 'relative_l2', 'elapsed_sec'
+            ],
+            extrasaction='ignore',
         )
         writer.writerow(row)
 
@@ -99,196 +108,171 @@ def _append_metrics_csv(csv_path, row):
 # Dataset factories
 # ---------------------------------------------------------------------------
 
-def _make_single_patch_dataset(dataset_type, data_dir, patch_size, output_dim,
-                                 train_ratio, seed, split, use_embedding,
-                                 enable_downsample=True, downsample_method='uniform', downsample_ratio=0.25,
-                                 embedding_filename='ship_params_embedding.pt', embedding_mode='precomputed',
-                                 zero_embedding_dim=0, prefer_cache=True):
+def _make_single_patch_dataset(
+    dataset_type, data_dir, patch_size, output_dim, train_ratio, seed, split,
+    use_embedding, enable_downsample=True, downsample_method='uniform',
+    downsample_ratio=0.25, embedding_filename='ship_params_embedding.pt',
+    embedding_mode='precomputed', zero_embedding_dim=0, prefer_cache=True,
+    rollout_holdout_steps=0, normalization_params=None,
+    condition_normalization_params=None, partition_mode='adaptive',
+):
+    common = dict(
+        step_size=1, patch_size=patch_size, output_dim=output_dim,
+        include_coordinates=True, normalize=True, split=split,
+        train_ratio=train_ratio, seed=seed,
+        enable_downsample=enable_downsample,
+        downsample_method=downsample_method,
+        downsample_ratio=downsample_ratio,
+        rollout_holdout_steps=rollout_holdout_steps,
+        normalization_params=normalization_params,
+    )
     if dataset_type == 'ship':
         return PatchFlowFieldDataset(
-            data_dir=data_dir, step_size=1,
-            patch_size=patch_size, output_dim=output_dim,
-            include_coordinates=True, normalize=True,
-            split=split, train_ratio=train_ratio, seed=seed,
-            enable_params=use_embedding,
+            data_dir=data_dir, enable_params=use_embedding,
+            enable_distance_refine=(partition_mode == 'adaptive'),
             embedding_filename=embedding_filename,
             embedding_mode=embedding_mode,
             zero_embedding_dim=zero_embedding_dim,
             prefer_cache=prefer_cache,
-            enable_downsample=enable_downsample,
-            downsample_method=downsample_method,
-            downsample_ratio=downsample_ratio,
+            condition_normalization_params=condition_normalization_params,
+            **common,
         )
-    elif dataset_type == 'cfd_bench':
+    if dataset_type == 'cfd_bench':
         roots, benchmarks, cases = _parse_cfd_dirs([data_dir])
         return CFDBenchPatchDataset(
-            root=roots[0], benchmark=benchmarks[0], case=cases[0],
-            step_size=1, patch_size=patch_size, output_dim=output_dim,
-            include_coordinates=True, normalize=True,
-            split=split, train_ratio=train_ratio, seed=seed,
-            enable_params=use_embedding,
-            enable_downsample=enable_downsample,
-            downsample_method=downsample_method,
-            downsample_ratio=downsample_ratio,
+            root=roots[0], benchmark=benchmarks[0], case=cases[0], **common,
         )
     raise ValueError(f"Unknown dataset type: {dataset_type}")
 
 
-def _make_multi_patch_dataset(dataset_type, data_dirs, patch_size, output_dim,
-                                train_ratio, seed, split, use_embedding,
-                                global_max_patches=None, global_max_points=None,
-                                enable_downsample=True, downsample_method='uniform', downsample_ratio=0.25,
-                                embedding_filename='ship_params_embedding.pt', embedding_mode='precomputed',
-                                zero_embedding_dim=0, prefer_cache=True):
+def _make_multi_patch_dataset(
+    dataset_type, data_dirs, patch_size, output_dim, train_ratio, seed, split,
+    use_embedding, global_max_patches=None, global_max_points=None,
+    global_max_full_points=None, enable_downsample=True,
+    downsample_method='uniform', downsample_ratio=0.25,
+    embedding_filename='ship_params_embedding.pt', embedding_mode='precomputed',
+    zero_embedding_dim=0, prefer_cache=True, rollout_holdout_steps=0,
+    normalization_params=None, condition_normalization_params=None,
+    partition_mode='adaptive',
+):
+    common = dict(
+        step_size=1, patch_size=patch_size, output_dim=output_dim,
+        include_coordinates=True, normalize=True, split=split,
+        train_ratio=train_ratio, seed=seed,
+        max_patches=global_max_patches, max_points=global_max_points,
+        max_full_points=global_max_full_points,
+        enable_downsample=enable_downsample,
+        downsample_method=downsample_method,
+        downsample_ratio=downsample_ratio,
+        rollout_holdout_steps=rollout_holdout_steps,
+        normalization_params=normalization_params,
+    )
     if dataset_type == 'ship':
         return MultiConditionPatchDataset(
-            data_dirs=data_dirs, step_size=1,
-            patch_size=patch_size, output_dim=output_dim,
-            include_coordinates=True, normalize=True,
-            split=split, train_ratio=train_ratio, seed=seed,
-            enable_params=use_embedding,
+            data_dirs=data_dirs, enable_params=use_embedding,
+            enable_distance_refine=(partition_mode == 'adaptive'),
             embedding_filename=embedding_filename,
             embedding_mode=embedding_mode,
             zero_embedding_dim=zero_embedding_dim,
             prefer_cache=prefer_cache,
-            max_patches=global_max_patches,
-            max_points=global_max_points,
-            enable_downsample=enable_downsample,
-            downsample_method=downsample_method,
-            downsample_ratio=downsample_ratio,
+            condition_normalization_params=condition_normalization_params,
+            **common,
         )
-    elif dataset_type == 'cfd_bench':
+    if dataset_type == 'cfd_bench':
         roots, benchmarks, cases = _parse_cfd_dirs(data_dirs)
         return MultiConditionCFDBenchPatchDataset(
-            roots=roots, benchmarks=benchmarks, cases=cases,
-            step_size=1, patch_size=patch_size, output_dim=output_dim,
-            include_coordinates=True, normalize=True,
-            split=split, train_ratio=train_ratio, seed=seed,
-            enable_params=use_embedding,
-            max_patches=global_max_patches,
-            max_points=global_max_points,
-            enable_downsample=enable_downsample,
-            downsample_method=downsample_method,
-            downsample_ratio=downsample_ratio,
+            roots=roots, benchmarks=benchmarks, cases=cases, **common,
         )
     raise ValueError(f"Unknown dataset type: {dataset_type}")
 
 
-def create_datasets(dataset_type, data_dirs, patch_size, output_dim,
-                    train_ratio, seed, use_embedding, multi_condition,
-                    enable_downsample=True, downsample_method='uniform', downsample_ratio=0.25,
-                    embedding_filename='ship_params_embedding.pt', embedding_mode='precomputed',
-                    zero_embedding_dim=0, val_data_dirs=None, val_split='test', prefer_cache=True):
-    """
-    构建训练集和验证集。
-
-    逻辑:
-      - 单工况: data_dirs[0] 按 train_ratio 划分 train/test
-      - 多工况: data_dirs 按 train_ratio 分别划分后合并
-    """
-    if not multi_condition:
-        train_ds = _make_single_patch_dataset(
-            dataset_type, data_dirs[0], patch_size, output_dim,
-            train_ratio, seed, 'train', use_embedding,
-            enable_downsample=enable_downsample,
-            downsample_method=downsample_method,
-            downsample_ratio=downsample_ratio,
-            embedding_filename=embedding_filename,
-            embedding_mode=embedding_mode,
-            zero_embedding_dim=zero_embedding_dim,
-            prefer_cache=prefer_cache)
-        val_ds = _make_single_patch_dataset(
-            dataset_type, (val_data_dirs or data_dirs)[0], patch_size, output_dim,
-            0.0 if val_split == 'all' else train_ratio,
-            seed, 'test' if val_split == 'all' else val_split, use_embedding,
-            enable_downsample=enable_downsample,
-            downsample_method=downsample_method,
-            downsample_ratio=downsample_ratio,
-            embedding_filename=embedding_filename,
-            embedding_mode=embedding_mode,
-            zero_embedding_dim=zero_embedding_dim,
-            prefer_cache=prefer_cache)
-        return train_ds, val_ds
-
-    # --- 多工况训练集 ---
-    train_ds = _make_multi_patch_dataset(
-        dataset_type, data_dirs, patch_size, output_dim,
-        train_ratio, seed, 'train', use_embedding,
+def create_datasets(
+    dataset_type, data_dirs, patch_size, output_dim, train_ratio, seed,
+    use_embedding, multi_condition, enable_downsample=True,
+    downsample_method='uniform', downsample_ratio=0.25,
+    embedding_filename='ship_params_embedding.pt', embedding_mode='precomputed',
+    zero_embedding_dim=0, val_data_dirs=None, val_split='test', prefer_cache=True,
+    rollout_holdout_steps=0, partition_mode='adaptive',
+):
+    holdout = rollout_holdout_steps if dataset_type == 'ship' and val_data_dirs is None else 0
+    kwargs = dict(
         enable_downsample=enable_downsample,
         downsample_method=downsample_method,
         downsample_ratio=downsample_ratio,
         embedding_filename=embedding_filename,
         embedding_mode=embedding_mode,
         zero_embedding_dim=zero_embedding_dim,
-        prefer_cache=prefer_cache)
+        prefer_cache=prefer_cache,
+        partition_mode=partition_mode,
+    )
 
-    # 从训练集获取全局形状，确保验证集 padding 与训练集一致
-    global_shape = train_ds.get_global_shape()
-    g_patches = global_shape['num_patches']
-    g_points  = global_shape['max_points']
+    if not multi_condition:
+        train_ds = _make_single_patch_dataset(
+            dataset_type, data_dirs[0], patch_size, output_dim, train_ratio,
+            seed, 'train', use_embedding, rollout_holdout_steps=holdout, **kwargs,
+        )
+        if dataset_type == 'ship' and val_data_dirs is None:
+            val_ds = train_ds.clone_for_split(val_split)
+        else:
+            val_ds = _make_single_patch_dataset(
+                dataset_type, (val_data_dirs or data_dirs)[0], patch_size, output_dim,
+                train_ratio, seed, val_split, use_embedding,
+                rollout_holdout_steps=holdout,
+                normalization_params=train_ds.get_normalization_params(),
+                condition_normalization_params=(
+                    train_ds.get_condition_normalization_params()
+                    if hasattr(train_ds, 'get_condition_normalization_params')
+                    else None
+                ),
+                **kwargs,
+            )
+        train_shape = (train_ds.num_patches, train_ds.max_points, train_ds.input_dim)
+        val_shape = (val_ds.num_patches, val_ds.max_points, val_ds.input_dim)
+        if train_shape != val_shape:
+            raise ValueError(
+                "Single-condition train/validation patch shapes differ; "
+                "use --multi_condition to enable padded cross-condition validation"
+            )
+        return train_ds, val_ds
+
+    train_ds = _make_multi_patch_dataset(
+        dataset_type, data_dirs, patch_size, output_dim, train_ratio, seed,
+        'train', use_embedding, rollout_holdout_steps=holdout, **kwargs,
+    )
+    train_norm = train_ds.get_normalization_params()
+    train_condition_norm = (
+        train_ds.get_condition_normalization_params()
+        if dataset_type == 'ship' else None
+    )
+    shape = train_ds.get_global_shape()
+    g_patches = shape['num_patches']
+    g_points = shape['max_points']
+    g_full_points = shape['full_points']
 
     if val_data_dirs is not None:
-        val_build_split = 'test' if val_split == 'all' else val_split
-        val_train_ratio = 0.0 if val_split == 'all' else train_ratio
-        val_probe = _make_multi_patch_dataset(
-            dataset_type, val_data_dirs, patch_size, output_dim,
-            val_train_ratio, seed, val_build_split, use_embedding,
-            enable_downsample=enable_downsample,
-            downsample_method=downsample_method,
-            downsample_ratio=downsample_ratio,
-            embedding_filename=embedding_filename,
-            embedding_mode=embedding_mode,
-            zero_embedding_dim=zero_embedding_dim,
-            prefer_cache=prefer_cache)
-        val_shape = val_probe.get_global_shape()
+        val_ds = _make_multi_patch_dataset(
+            dataset_type, val_data_dirs, patch_size, output_dim, train_ratio,
+            seed, val_split, use_embedding, normalization_params=train_norm,
+            condition_normalization_params=train_condition_norm,
+            rollout_holdout_steps=0, **kwargs,
+        )
+        val_shape = val_ds.get_global_shape()
         g_patches = max(g_patches, val_shape['num_patches'])
         g_points = max(g_points, val_shape['max_points'])
-        train_ds = _make_multi_patch_dataset(
-            dataset_type, data_dirs, patch_size, output_dim,
-            train_ratio, seed, 'train', use_embedding,
-            global_max_patches=g_patches,
-            global_max_points=g_points,
-            enable_downsample=enable_downsample,
-            downsample_method=downsample_method,
-            downsample_ratio=downsample_ratio,
-            embedding_filename=embedding_filename,
-            embedding_mode=embedding_mode,
-            zero_embedding_dim=zero_embedding_dim,
-            prefer_cache=prefer_cache)
-        val_ds = _make_multi_patch_dataset(
-            dataset_type, val_data_dirs, patch_size, output_dim,
-            val_train_ratio, seed, val_build_split, use_embedding,
-            global_max_patches=g_patches,
-            global_max_points=g_points,
-            enable_downsample=enable_downsample,
-            downsample_method=downsample_method,
-            downsample_ratio=downsample_ratio,
-            embedding_filename=embedding_filename,
-            embedding_mode=embedding_mode,
-            zero_embedding_dim=zero_embedding_dim,
-            prefer_cache=prefer_cache)
+        g_full_points = max(g_full_points, val_shape['full_points'])
+        train_ds.global_max_patches = val_ds.global_max_patches = g_patches
+        train_ds.global_max_points = val_ds.global_max_points = g_points
+        train_ds.global_max_full_points = val_ds.global_max_full_points = g_full_points
         return train_ds, val_ds
 
     if dataset_type == 'cfd_bench':
         val_ds = MultiConditionCFDBenchPatchDataset.from_existing(
-            train_ds,
-            split='test',
-            max_patches=g_patches,
-            max_points=g_points,
+            train_ds, split='test', max_patches=g_patches, max_points=g_points,
         )
     else:
-        val_ds = _make_multi_patch_dataset(
-            dataset_type, data_dirs, patch_size, output_dim,
-            train_ratio, seed, 'test', use_embedding,
-            global_max_patches=g_patches,
-            global_max_points=g_points,
-            enable_downsample=enable_downsample,
-            downsample_method=downsample_method,
-            downsample_ratio=downsample_ratio,
-            embedding_filename=embedding_filename,
-            embedding_mode=embedding_mode,
-            zero_embedding_dim=zero_embedding_dim)
-
+        val_ds = MultiConditionPatchDataset.from_existing(
+            train_ds, split='test'
+        )
     return train_ds, val_ds
 
 
@@ -303,17 +287,17 @@ def train_epoch(model, dataloader, optimizer, criterion, device,
     n_samples = 0
 
     for batch in tqdm(dataloader, desc="Training", disable=disable_tqdm):
-        input_patches  = batch['input'].to(device)
-        target_patches = batch['output'].to(device)
+        input_patches  = batch['input'].to(device, non_blocking=True)
+        target_patches = batch['output'].to(device, non_blocking=True)
         mask = batch.get('mask', None)
         if mask is not None:
-            mask = mask.to(device)
+            mask = mask.to(device, non_blocking=True)
 
         params_embed = None
         if use_embedding and 'params_embedding' in batch:
-            params_embed = batch['params_embedding'].to(device)
+            params_embed = batch['params_embedding'].to(device, non_blocking=True)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         if model_type == 'dpt':
             pred = model(input_patches, mask=mask, params_embed=params_embed)
@@ -333,17 +317,17 @@ def train_epoch(model, dataloader, optimizer, criterion, device,
 def train_one_step(model, batch, optimizer, criterion, device,
                    model_type='transformer', use_embedding=False):
     model.train()
-    input_patches = batch['input'].to(device)
-    target_patches = batch['output'].to(device)
+    input_patches = batch['input'].to(device, non_blocking=True)
+    target_patches = batch['output'].to(device, non_blocking=True)
     mask = batch.get('mask', None)
     if mask is not None:
-        mask = mask.to(device)
+        mask = mask.to(device, non_blocking=True)
 
     params_embed = None
     if use_embedding and 'params_embedding' in batch:
-        params_embed = batch['params_embedding'].to(device)
+        params_embed = batch['params_embedding'].to(device, non_blocking=True)
 
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
     if model_type == 'dpt':
         pred = model(input_patches, mask=mask, params_embed=params_embed)
     else:
@@ -352,37 +336,28 @@ def train_one_step(model, batch, optimizer, criterion, device,
     loss = criterion(pred, target_patches, mask)
     loss.backward()
     optimizer.step()
-    return float(loss.item())
+    return loss.detach()
 
 
 def validate(model, dataloader, criterion, device, ref_dataset,
              model_type='transformer', use_embedding=False, disable_tqdm=False):
-    """
-    验证函数。
-
-    当 ref_dataset 是单工况 PatchFlowFieldDataset 时，额外做
-    patches_to_points 转换并计算逐点指标。
-    多工况数据集没有统一的 quadtree，只报告 loss。
-    """
+    """Validate after global k-NN recovery on every original CFD point."""
     model.eval()
     total_loss = 0
-    n_samples  = 0
+    n_samples = 0
     metrics_calc = MetricsCalculator()
-
-    # 判断是否可以做 patches_to_points（需要单一 quadtree）
-    has_quadtree = hasattr(ref_dataset, 'quadtree')
+    is_multi = hasattr(ref_dataset, 'sub_datasets')
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validation", disable=disable_tqdm):
-            input_patches  = batch['input'].to(device)
-            target_patches = batch['output'].to(device)
-            mask = batch.get('mask', None)
-            if mask is not None:
-                mask = mask.to(device)
+            input_patches = batch['input'].to(device, non_blocking=True)
+            target_patches = batch['output'].to(device, non_blocking=True)
+            full_target = batch['full_target'].to(device, non_blocking=True)
+            mask = batch['mask'].to(device, non_blocking=True)
 
             params_embed = None
             if use_embedding and 'params_embedding' in batch:
-                params_embed = batch['params_embedding'].to(device)
+                params_embed = batch['params_embedding'].to(device, non_blocking=True)
 
             if model_type == 'dpt':
                 pred = model(input_patches, mask=mask, params_embed=params_embed)
@@ -391,40 +366,40 @@ def validate(model, dataloader, criterion, device, ref_dataset,
 
             loss = criterion(pred, target_patches, mask)
             total_loss += loss.item() * input_patches.size(0)
-            n_samples  += input_patches.size(0)
+            n_samples += input_patches.size(0)
 
-            if has_quadtree:
-                pred_points, pred_valid = patches_to_points(
-                    patches=pred,
-                    quadtree=ref_dataset.quadtree,
-                    batch_size=pred.size(0),
-                    n_points=ref_dataset.num_points,
-                    n_channels=ref_dataset.output_dim,
-                    input_dim=ref_dataset.output_dim,
-                    max_points=ref_dataset.max_points,
-                )
-                tgt_points, tgt_valid = patches_to_points(
-                    patches=target_patches,
-                    quadtree=ref_dataset.quadtree,
-                    batch_size=target_patches.size(0),
-                    n_points=ref_dataset.num_points,
-                    n_channels=ref_dataset.output_dim,
-                    input_dim=ref_dataset.output_dim,
-                    max_points=ref_dataset.max_points,
-                )
-                metrics_calc.update(pred_points, tgt_points,
-                                    mask=pred_valid & tgt_valid)
+            if is_multi:
+                condition_ids = batch['condition_id']
+                for condition_id in condition_ids.unique(sorted=True).tolist():
+                    select = condition_ids == condition_id
+                    sub_dataset = ref_dataset.get_sub_dataset(condition_id)
+                    pred_subset = pred[select.to(pred.device)]
+                    target_subset = full_target[select.to(full_target.device), :sub_dataset.num_points]
+                    sampled_points, _ = patches_to_points(
+                        pred_subset, sub_dataset.quadtree, pred_subset.size(0),
+                        sub_dataset.num_points, sub_dataset.output_dim,
+                        sub_dataset.output_dim, sub_dataset.max_points,
+                    )
+                    recovered = recover_points_knn(
+                        sampled_points,
+                        sub_dataset.recovery_indices,
+                        sub_dataset.recovery_weights,
+                        sub_dataset.sampled_indices,
+                    )
+                    metrics_calc.update(recovered, target_subset)
             else:
-                # 多工况：用 patch 空间直接计算指标（mask 内有效位置）
-                if mask is not None:
-                    B, P, N = mask.shape
-                    C_out = pred.shape[-1] // N
-                    pred_reshaped = pred.view(B, P, N, C_out)
-                    target_reshaped = target_patches.view(B, P, N, C_out)
-                    valid = mask.unsqueeze(-1).expand_as(pred_reshaped)
-                    metrics_calc.update(pred_reshaped[valid], target_reshaped[valid])
-                else:
-                    metrics_calc.update(pred, target_patches)
+                sampled_points, _ = patches_to_points(
+                    pred, ref_dataset.quadtree, pred.size(0), ref_dataset.num_points,
+                    ref_dataset.output_dim, ref_dataset.output_dim,
+                    ref_dataset.max_points,
+                )
+                recovered = recover_points_knn(
+                    sampled_points,
+                    ref_dataset.recovery_indices,
+                    ref_dataset.recovery_weights,
+                    ref_dataset.sampled_indices,
+                )
+                metrics_calc.update(recovered, full_target)
 
     metrics = metrics_calc.compute()
     return total_loss / n_samples, metrics
@@ -437,8 +412,8 @@ def validate(model, dataloader, criterion, device, ref_dataset,
 def main():
     parser = argparse.ArgumentParser(description='Train Patch Models')
     parser.add_argument('--model', type=str, default='transformer',
-                        choices=['transformer', 'dpt'],
-                        help='Model architecture: transformer or dpt')
+                        choices=['transformer', 'learned_transformer', 'dpt'],
+                        help='Model architecture')
     parser.add_argument('--dataset_type', type=str, default='ship',
                         choices=['ship', 'cfd_bench'])
     parser.add_argument('--data_dirs', type=str, nargs='+',
@@ -460,43 +435,64 @@ def main():
                         help='Logging interval in step-based mode')
     parser.add_argument('--lr',          type=float, default=1e-4)
     parser.add_argument('--patch_size',  type=int,   default=64)
+    parser.add_argument('--partition_mode', choices=['adaptive', 'uniform'],
+                        default='adaptive',
+                        help='Quadtree capacity rule for ShipBench patches')
     parser.add_argument('--output_dim',  type=int,   default=4,
                         help='Flow output channels')
     parser.add_argument('--d_model',     type=int,   default=64)
     parser.add_argument('--nhead',       type=int,   default=4)
     parser.add_argument('--num_layers',  type=int,   default=4)
+    parser.add_argument('--slice_num', type=int, default=32,
+                        help='Learned slices per head for learned_transformer')
     parser.add_argument('--features',    type=int,   default=128,
                         help='DPT feature width')
     parser.add_argument('--n_heads',     type=int,   default=4,
                         help='DPT attention heads')
     parser.add_argument('--train_ratio', type=float, default=0.8,
-                        help='Train/val split ratio')
+                        help='Train/val split ratio over valid temporal pairs')
+    parser.add_argument('--rollout_holdout_steps', type=int, default=50,
+                        help='Reserved contiguous ShipBench rollout horizon (0 disables)')
     parser.add_argument('--enable_downsample', action='store_true', default=True,
                         help='Enable APP downsampling in patch dataset')
     parser.add_argument('--disable_downsample', action='store_true', default=False,
                         help='Disable APP downsampling in patch dataset')
     parser.add_argument('--disable_cache', action='store_true', default=False,
                         help='Load CSV timesteps directly instead of flow_cache.npz')
+    parser.add_argument('--num_workers', type=int, default=0,
+                        help='DataLoader worker processes')
     parser.add_argument('--downsample_method', type=str, default='distance', choices=['uniform', 'distance'],
                         help='Downsample method used by APP patching')
     parser.add_argument('--downsample_ratio', type=float, default=0.25,
                         help='Patch downsample ratio when downsampling is enabled')
     parser.add_argument('--save_dir',    type=str,   default='outputs_patch')
     parser.add_argument('--use_embedding', action='store_true', default=False,
-                        help='Use pre-computed ship parameter embeddings')
-    parser.add_argument('--embedding_mode', type=str, default='precomputed', choices=['precomputed', 'zero'],
-                        help='Parameter embedding source when --use_embedding is set')
+                        help='Use ship geometry and operating-condition features')
+    parser.add_argument('--embedding_mode', type=str, default='precomputed',
+                        choices=['precomputed', 'zero', 'numeric'],
+                        help='Condition feature source when --use_embedding is set')
+    parser.add_argument('--condition_encoder', type=str, default='token',
+                        choices=['token', 'mlp', 'fourier_mlp', 'film'],
+                        help='How condition features enter the patch backbone')
     parser.add_argument('--embedding_filename', type=str, default='ship_params_embedding.pt',
                         help='Pre-computed embedding filename inside each condition directory')
     parser.add_argument('--zero_embedding_dim', type=int, default=0,
                         help='Zero embedding dimension when --embedding_mode zero')
     parser.add_argument('--embedding_dim', type=int, default=128)
     parser.add_argument('--seed',        type=int,   default=42)
+    parser.add_argument('--split_seed', type=int, default=None,
+                        help='Dataset split seed (default: --seed)')
     parser.add_argument('--disable_tqdm', action='store_true', default=False,
                         help='Disable tqdm progress bars (recommended for log redirection)')
     args = parser.parse_args()
+    split_seed = args.seed if args.split_seed is None else args.split_seed
     if args.disable_downsample:
         args.enable_downsample = False
+    if args.use_embedding:
+        if args.embedding_mode == 'numeric' and args.condition_encoder == 'token':
+            raise ValueError('numeric embedding_mode requires mlp, fourier_mlp, or film')
+        if args.embedding_mode != 'numeric' and args.condition_encoder != 'token':
+            raise ValueError('zero and precomputed embeddings require condition_encoder=token')
 
     set_seed(args.seed)
 
@@ -505,13 +501,21 @@ def main():
     print(f"Model:           {args.model}")
     print(f"Dataset type:    {args.dataset_type}")
     print(f"Multi-condition: {args.multi_condition}")
+    print(f"Partition mode:  {args.partition_mode}")
+    print(f"Model seed:      {args.seed}; split seed: {split_seed}")
     print(f"Data dirs:       {args.data_dirs}")
     print(f"Val data dirs:   {args.val_data_dirs}")
     print(f"Val split:       {args.val_split if args.val_data_dirs else 'test split from data_dirs'} (ratio={args.train_ratio})")
     print(f"Use embedding:   {args.use_embedding}")
     print(f"Embedding mode:  {args.embedding_mode}, file={args.embedding_filename}, zero_dim={args.zero_embedding_dim}")
+    print(f"Condition encoder: {args.condition_encoder}")
     print(f"Downsample:      {args.enable_downsample} ({args.downsample_method}, ratio={args.downsample_ratio})")
     print(f"Prefer cache:    {not args.disable_cache}")
+    effective_holdout = (
+        args.rollout_holdout_steps
+        if args.dataset_type == 'ship' and args.val_data_dirs is None else 0
+    )
+    print(f"Rollout holdout: {effective_holdout} steps")
 
     disable_tqdm = bool(args.disable_tqdm or (not sys.stderr.isatty()))
     print(f"Disable tqdm:    {disable_tqdm}")
@@ -533,7 +537,7 @@ def main():
         patch_size=args.patch_size,
         output_dim=args.output_dim,
         train_ratio=args.train_ratio,
-        seed=args.seed,
+        seed=split_seed,
         use_embedding=args.use_embedding,
         multi_condition=args.multi_condition,
         enable_downsample=args.enable_downsample,
@@ -545,7 +549,10 @@ def main():
         val_data_dirs=args.val_data_dirs,
         val_split=args.val_split,
         prefer_cache=not args.disable_cache,
+        rollout_holdout_steps=args.rollout_holdout_steps,
+        partition_mode=args.partition_mode,
     )
+    save_data_protocol(args.save_dir, train_dataset, val_dataset)
 
     # Determine flattened dims and max_patches for model construction
     if args.multi_condition:
@@ -568,35 +575,48 @@ def main():
     if args.use_embedding:
         args.embedding_dim = int(getattr(train_dataset, 'embedding_dim', 0))
         print(f"Embedding dim: {args.embedding_dim}")
-        if args.embedding_dim > 0:
-            params_dim = args.embedding_dim
-            print(f"Project embedding: {args.embedding_dim} -> d_model {args.d_model}")
-        else:
-            print("Warning: --use_embedding is set but no pre-computed params_embedding was found.")
+        if args.embedding_dim <= 0:
+            raise ValueError('Condition features were requested but not loaded')
+        params_dim = args.embedding_dim
+        print(f"Condition feature dim: {args.embedding_dim} -> d_model {args.d_model}")
 
     # ------------------------------------------------------------------ #
     # DataLoaders
     # ------------------------------------------------------------------ #
+    loader_kwargs = {
+        'num_workers': args.num_workers,
+        'pin_memory': device.type == 'cuda',
+    }
+    if args.num_workers > 0:
+        loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=0, pin_memory=True,
+        train_dataset, batch_size=args.batch_size, shuffle=True, **loader_kwargs,
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=0, pin_memory=True,
+        val_dataset, batch_size=args.batch_size, shuffle=False, **loader_kwargs,
     )
 
     # ------------------------------------------------------------------ #
     # Model
     # ------------------------------------------------------------------ #
-    if args.model == 'transformer':
-        model = Transformer(
+    if args.model in {'transformer', 'learned_transformer'}:
+        model_class = (
+            LearnedPatchTransformer
+            if args.model == 'learned_transformer'
+            else Transformer
+        )
+        model_kwargs = {}
+        if args.model == 'learned_transformer':
+            model_kwargs['slice_num'] = args.slice_num
+        model = model_class(
             in_flattened_dim=in_flattened_dim,
             out_flattened_dim=out_flattened_dim,
             d_model=args.d_model,
             nhead=args.nhead,
             num_layers=args.num_layers,
             params_dim=params_dim,
+            condition_encoder=args.condition_encoder,
+            **model_kwargs,
         ).to(device)
     else:
         model = DPT(
@@ -608,13 +628,23 @@ def main():
             n_layers=args.num_layers,
             max_patches=global_max_patches,
             params_dim=params_dim,
+            condition_encoder=args.condition_encoder,
         ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
     n_train  = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model params: {n_params:,} total / {n_train:,} trainable")
+    with open(os.path.join(args.save_dir, 'run_config.json'), 'w', encoding='utf-8') as handle:
+        run_config = vars(args).copy()
+        run_config.update(
+            model_seed=args.seed,
+            resolved_split_seed=split_seed,
+            model_params=n_params,
+            trainable_params=n_train,
+        )
+        json.dump(run_config, handle, indent=2)
 
-    if args.model == 'transformer':
+    if args.model in {'transformer', 'learned_transformer'}:
         criterion = TransformerLoss(use_mask=True)
     else:
         criterion = DPTLoss()
@@ -641,19 +671,19 @@ def main():
             step += 1
             pbar.update(1)
 
-            loss_val = train_one_step(
+            loss_tensor = train_one_step(
                 model, batch, optimizer, criterion, device,
                 model_type=args.model, use_embedding=args.use_embedding,
             )
-            train_losses_since_eval.append(loss_val)
+            train_losses_since_eval.append(loss_tensor)
 
             if step % args.log_every == 0:
-                pbar.set_postfix(loss=f"{loss_val:.6f}")
+                pbar.set_postfix(loss=f"{loss_tensor.item():.6f}")
 
             if step % args.eval_every != 0 and step != args.max_steps:
                 continue
 
-            train_loss = float(np.mean(train_losses_since_eval)) if train_losses_since_eval else loss_val
+            train_loss = float(torch.stack(train_losses_since_eval).mean().item())
             train_losses_since_eval = []
 
             val_loss, val_metrics = validate(
@@ -671,6 +701,10 @@ def main():
                 'mae': float(val_metrics['mae']),
                 'mse': float(val_metrics['mse']),
                 'rmse': float(val_metrics['rmse']),
+                'relative_l2': float(val_metrics['relative_l2']),
+                'mae_per_channel': val_metrics['mae_per_channel'],
+                'rmse_per_channel': val_metrics['rmse_per_channel'],
+                'relative_l2_per_channel': val_metrics['relative_l2_per_channel'],
                 'elapsed_sec': float(time.time() - t0),
             }
             metrics_records.append(record)
@@ -708,6 +742,10 @@ def main():
                 'mae': float(val_metrics['mae']),
                 'mse': float(val_metrics['mse']),
                 'rmse': float(val_metrics['rmse']),
+                'relative_l2': float(val_metrics['relative_l2']),
+                'mae_per_channel': val_metrics['mae_per_channel'],
+                'rmse_per_channel': val_metrics['rmse_per_channel'],
+                'relative_l2_per_channel': val_metrics['relative_l2_per_channel'],
                 'elapsed_sec': float(time.time() - t0),
             }
             metrics_records.append(record)
