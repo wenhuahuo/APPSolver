@@ -30,7 +30,10 @@ APPsolver/
 ├── scripts/
 │   ├── train_patch.py
 │   ├── train_irregular.py
-│   └── precompute_ship_embeddings.py
+│   ├── train_irregular_pcno.py
+│   ├── evaluate_*.py
+│   └── slurm/
+├── vis/
 ├── requirements.txt
 └── README.md
 ```
@@ -42,6 +45,7 @@ Main code modules:
 - `src/models/`: APP patch models and irregular baseline models
 - `src/core/`: training, metrics, and checkpoint utilities
 - `scripts/`: training, evaluation, and experiment entry points
+- `vis/`: visualization scripts and generated figures
 
 ## Environment Setup
 
@@ -106,24 +110,25 @@ All commands below should be run from the project root.
 
 ### 1. Build flow caches
 
-Build `flow_cache.npz` from raw ShipBench `timestep_*.csv` files and CFDBench `data*.txt` files. The script automatically discovers valid dataset directories under the given roots.
+Build ShipBench caches on a fixed reference point set and CFDBench caches from raw `data*.txt` files:
 
 ```bash
-python scripts/build_flow_cache.py \
-  --dataset all \
-  --ship-root datasets/shipBench \
-  --cfd-root datasets/cfdBench
+python scripts/rebuild_ship_flow_cache.py \
+  --root datasets/shipBench
+
+python scripts/build_cfdbench_flow_cache.py \
+  --root datasets/cfdBench
 ```
 
-This generates `flow_cache.npz` in each discovered data directory. Add `--overwrite` if you need to rebuild existing cache files.
+Both commands discover valid dataset directories below the given root and generate `flow_cache.npz`. Use `--overwrite` with the CFDBench builder when replacing existing caches; the ShipBench builder backs up an existing cache before replacement.
 
 ### 2. Precompute LLM condition embeddings
 
 ```bash
 python scripts/precompute_ship_embeddings.py \
-  --data_dir datasets/shipBench/DTC/field/1Re \
+  --data_dirs datasets/shipBench/DTC/field/1Re \
   --llm_model Qwen/Qwen2.5-0.5B \
-  --output_dir datasets/shipBench/DTC/field/1Re
+  --embedding_filename ship_params_embedding.pt
 ```
 
 This generates `ship_params_embedding.pt` under the condition directory.
