@@ -9,6 +9,7 @@ Cache format (.npz):
 
 import argparse
 import os
+import re
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from fnmatch import fnmatch
 from typing import List, Sequence, Tuple
@@ -20,6 +21,16 @@ from scipy.spatial import KDTree
 
 SHIP_CHANNELS = ['U:0', 'U:1', 'U:2', 'p_rgh']
 CFD_CHANNELS = ['y-velocity', 'x-velocity']
+_TIMESTEP_RE = re.compile(r'^timestep_(\d+)\.csv$')
+
+
+def _timestep_sort_key(name: str) -> int:
+    match = _TIMESTEP_RE.match(name)
+    if match is None:
+        raise ValueError(f'Unexpected timestep filename: {name}')
+    return int(match.group(1))
+
+
 CFD_COLUMN_ALIASES = {
     'volume-fraction-water': 'water-vof',
     'y-velocity-water': 'y-velocity',
@@ -35,6 +46,34 @@ def _standardize_cfd_columns(df: pd.DataFrame) -> pd.DataFrame:
     if rename_map:
         return df.rename(columns=rename_map)
     return df
+
+
+def _align_ship_series(
+    coords_list: Sequence[np.ndarray], flows_list: Sequence[np.ndarray], k: int = 4
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Interpolate all frames to the first frame's fixed 3-D reference points."""
+    reference = coords_list[0]
+    aligned_flows = np.empty(
+        (len(flows_list), len(reference), flows_list[0].shape[1]), dtype=np.float32
+    )
+    aligned_flows[0] = flows_list[0]
+
+    for frame_id, (coords, flows) in enumerate(
+        zip(coords_list[1:], flows_list[1:]), start=1
+    ):
+        distances, neighbors = KDTree(coords).query(reference, k=k)
+        exact = distances[:, 0] <= 1e-12
+        aligned_flows[frame_id, exact] = flows[neighbors[exact, 0]]
+        weights = 1.0 / np.maximum(distances[~exact], 1e-12)
+        weights /= weights.sum(axis=1, keepdims=True)
+        aligned_flows[frame_id, ~exact] = np.sum(
+            flows[neighbors[~exact]] * weights[..., None], axis=1
+        )
+
+    fixed_coords = np.broadcast_to(
+        reference[None, :, :2], (len(coords_list), len(reference), 2)
+    ).copy()
+    return fixed_coords, aligned_flows
 
 
 def _align_series(coords_list: Sequence[np.ndarray], flows_list: Sequence[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
@@ -55,8 +94,9 @@ def _align_series(coords_list: Sequence[np.ndarray], flows_list: Sequence[np.nda
 
 def _build_ship_cache(data_dir: str, cache_path: str) -> None:
     files = sorted(
-        f for f in os.listdir(data_dir)
-        if f.startswith('timestep_') and f.endswith('.csv')
+        (f for f in os.listdir(data_dir)
+         if f.startswith('timestep_') and f.endswith('.csv')),
+        key=_timestep_sort_key,
     )
     if not files:
         raise RuntimeError('no timestep_*.csv found')
@@ -67,18 +107,18 @@ def _build_ship_cache(data_dir: str, cache_path: str) -> None:
         path = os.path.join(data_dir, name)
         df = pd.read_csv(path)
 
-        required = ['Center:0', 'Center:1', *SHIP_CHANNELS]
+        required = ['Center:0', 'Center:1', 'Center:2', *SHIP_CHANNELS]
         missing = [c for c in required if c not in df.columns]
         if missing:
             raise RuntimeError(f'missing columns {missing} in {path}')
 
-        coords = df[['Center:0', 'Center:1']].values.astype(np.float32)
+        coords = df[['Center:0', 'Center:1', 'Center:2']].values.astype(np.float32)
         flows = df[SHIP_CHANNELS].values.astype(np.float32)
 
         coords_list.append(coords)
         flows_list.append(flows)
 
-    coords, flows = _align_series(coords_list, flows_list)
+    coords, flows = _align_ship_series(coords_list, flows_list)
     np.savez(cache_path, coords=coords, flows=flows, channels=np.asarray(SHIP_CHANNELS))
 
 

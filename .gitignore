@@ -1,5 +1,5 @@
 outputs/
-datasets/
+/datasets/
 runs/
 logs/
 artifacts/
