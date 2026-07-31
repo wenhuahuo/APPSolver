@@ -24,17 +24,18 @@ class LLMEncoder(nn.Module):
         super().__init__()
         self.model_name = model_name
         
-        from transformers import AutoTokenizer, AutoModel
+        from transformers import AutoModelForCausalLM, AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.llm = AutoModel.from_pretrained(model_name)
+        self.llm = AutoModelForCausalLM.from_pretrained(model_name)
         
         for param in self.llm.parameters():
             param.requires_grad = False
 
-        if model_name == 'Qwen/Qwen2.5-0.5B':
-            self.hidden_size = self.llm.config.hidden_size
-        elif model_name == 'Qwen/Qwen3.5-0.8B':
-            self.hidden_size = self.llm.config.text_config.hidden_size
+        config = self.llm.config
+        if hasattr(config, 'hidden_size'):
+            self.hidden_size = config.hidden_size
+        else:
+            self.hidden_size = config.text_config.hidden_size
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -63,13 +64,12 @@ class LLMEncoder(nn.Module):
         ).to(device)
         
         with torch.no_grad():
-            outputs = self.llm(**inputs)
-            
-            if hasattr(outputs, 'last_hidden_state') and outputs.last_hidden_state is not None:
-                cls_embed = outputs.last_hidden_state[:, 0, :]
-            else:
-                cls_embed = outputs.pooler_output
-            
-            cls_embed = cls_embed.float()
+            outputs = self.llm(
+                **inputs, output_hidden_states=True, use_cache=False
+            )
+            hidden = outputs.hidden_states[-1]
+            last_index = inputs['attention_mask'].sum(dim=1) - 1
+            batch_index = torch.arange(last_index.shape[0], device=device)
+            cls_embed = hidden[batch_index, last_index].float()
         
         return cls_embed.squeeze(0)
