@@ -24,6 +24,8 @@ from src.models.irregular.fusion_deeponet import FusionDeepONet, FusionDeepONetL
 from src.models.irregular.upt import UPT, UPTLoss
 from src.models.irregular.gnot import GNOT, GNOTLoss
 from src.core.metrics import MetricsCalculator
+from src.datasets.samplers import ConditionBatchSampler
+from src.datasets.temporal import save_data_protocol
 
 
 MODEL_REGISTRY = {
@@ -61,8 +63,9 @@ def _init_metrics_csv(csv_path):
             f,
             fieldnames=[
                 'mode', 'epoch', 'step', 'train_loss',
-                'val_loss', 'mae', 'mse', 'rmse', 'elapsed_sec'
-            ]
+                'val_loss', 'mae', 'mse', 'rmse', 'relative_l2', 'elapsed_sec'
+            ],
+            extrasaction='ignore',
         )
         writer.writeheader()
 
@@ -73,8 +76,9 @@ def _append_metrics_csv(csv_path, row):
             f,
             fieldnames=[
                 'mode', 'epoch', 'step', 'train_loss',
-                'val_loss', 'mae', 'mse', 'rmse', 'elapsed_sec'
-            ]
+                'val_loss', 'mae', 'mse', 'rmse', 'relative_l2', 'elapsed_sec'
+            ],
+            extrasaction='ignore',
         )
         writer.writerow(row)
 
@@ -95,11 +99,11 @@ def train_epoch(model, dataloader, criterion, optimizer, device, multi_condition
 
     for batch in tqdm(dataloader, desc="Training", disable=disable_tqdm):
         pos, flow, target = _unpack_batch(batch, multi_condition)
-        pos = pos.to(device)
-        flow = flow.to(device)
-        target = target.to(device)
+        pos = pos.to(device, non_blocking=True)
+        flow = flow.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         pred = model(pos, flow)
         loss = criterion(pred, target)
         loss.backward()
@@ -114,16 +118,16 @@ def train_epoch(model, dataloader, criterion, optimizer, device, multi_condition
 def train_one_step(model, batch, criterion, optimizer, device, multi_condition=False):
     model.train()
     pos, flow, target = _unpack_batch(batch, multi_condition)
-    pos = pos.to(device)
-    flow = flow.to(device)
-    target = target.to(device)
+    pos = pos.to(device, non_blocking=True)
+    flow = flow.to(device, non_blocking=True)
+    target = target.to(device, non_blocking=True)
 
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
     pred = model(pos, flow)
     loss = criterion(pred, target)
     loss.backward()
     optimizer.step()
-    return float(loss.item())
+    return loss.detach()
 
 
 def validate(model, dataloader, criterion, device, multi_condition=False, disable_tqdm=False):
@@ -135,9 +139,9 @@ def validate(model, dataloader, criterion, device, multi_condition=False, disabl
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validation", disable=disable_tqdm):
             pos, flow, target = _unpack_batch(batch, multi_condition)
-            pos = pos.to(device)
-            flow = flow.to(device)
-            target = target.to(device)
+            pos = pos.to(device, non_blocking=True)
+            flow = flow.to(device, non_blocking=True)
+            target = target.to(device, non_blocking=True)
 
             pred = model(pos, flow)
             loss = criterion(pred, target)
@@ -159,69 +163,82 @@ def _parse_cfd_dirs(data_dirs):
     return roots, benchmarks, cases
 
 
-def _make_single_dataset(dataset_type, data_dir, step_size, train_ratio, seed, split, prefer_cache=True):
-    """构建单工况数据集（train 或 test split）。"""
+def _make_single_dataset(
+    dataset_type, data_dir, step_size, train_ratio, seed, split,
+    prefer_cache=True, rollout_holdout_steps=0, normalization_params=None,
+):
+    common = dict(
+        step_size=step_size, train_ratio=train_ratio, seed=seed, normalize=True,
+        rollout_holdout_steps=rollout_holdout_steps,
+        normalization_params=normalization_params,
+    )
     if dataset_type == 'ship':
         ds = IrregularFlowFieldDataset(
-            data_dir=data_dir, step_size=step_size,
-            train_ratio=train_ratio, seed=seed, normalize=True,
-            prefer_cache=prefer_cache,
+            data_dir=data_dir, prefer_cache=prefer_cache, **common,
         )
-        ds.set_split(split)
-        return ds
     elif dataset_type == 'cfd_bench':
         roots, benchmarks, cases = _parse_cfd_dirs([data_dir])
         ds = CFDBenchIrregularDataset(
-            root=roots[0], benchmark=benchmarks[0], case=cases[0],
-            step_size=step_size, train_ratio=train_ratio, seed=seed, normalize=True,
-        )
-        ds.set_split(split)
-        return ds
-    raise ValueError(f"Unknown dataset type: {dataset_type}")
-
-
-def _make_multi_dataset(dataset_type, data_dirs, step_size, train_ratio, seed, split):
-    """构建多工况数据集（train 或 test split）。"""
-    if dataset_type == 'ship':
-        return MultiConditionIrregularDataset(
-            data_dirs=data_dirs, step_size=step_size,
-            train_ratio=train_ratio, seed=seed, normalize=True, split=split,
-        )
-    elif dataset_type == 'cfd_bench':
-        roots, benchmarks, cases = _parse_cfd_dirs(data_dirs)
-        return MultiConditionCFDBenchIrregularDataset(
-            roots=roots, benchmarks=benchmarks, cases=cases,
-            step_size=step_size, train_ratio=train_ratio, seed=seed,
-            normalize=True, split=split,
-        )
-    raise ValueError(f"Unknown dataset type: {dataset_type}")
-
-
-def create_datasets(dataset_type, data_dirs, step_size, train_ratio, seed, multi_condition, prefer_cache=True):
-    """
-    构建训练集和验证集。
-
-    逻辑:
-      - 单工况: 从 data_dirs[0] 按 train_ratio 划分 train/test
-      - 多工况: 从 data_dirs 按 train_ratio 分别划分后合并
-    """
-    if not multi_condition:
-        train_ds = _make_single_dataset(dataset_type, data_dirs[0], step_size, train_ratio, seed, 'train', prefer_cache=prefer_cache)
-        val_ds   = _make_single_dataset(dataset_type, data_dirs[0], step_size, train_ratio, seed, 'test', prefer_cache=prefer_cache)
-        return train_ds, val_ds
-
-    # 多工况训练集（train split）
-    train_ds = _make_multi_dataset(dataset_type, data_dirs, step_size, train_ratio, seed, 'train')
-
-    if dataset_type == 'cfd_bench':
-        val_ds = MultiConditionCFDBenchIrregularDataset.from_existing(
-            train_ds,
-            split='test',
-            max_points=train_ds.global_max_points,
+            root=roots[0], benchmark=benchmarks[0], case=cases[0], **common,
         )
     else:
-        val_ds = _make_multi_dataset(dataset_type, data_dirs, step_size, train_ratio, seed, 'test')
+        raise ValueError(f"Unknown dataset type: {dataset_type}")
+    ds.set_split(split)
+    return ds
 
+
+def _make_multi_dataset(
+    dataset_type, data_dirs, step_size, train_ratio, seed, split,
+    rollout_holdout_steps=0, normalization_params=None,
+):
+    common = dict(
+        step_size=step_size, train_ratio=train_ratio, seed=seed,
+        normalize=True, split=split,
+        rollout_holdout_steps=rollout_holdout_steps,
+        normalization_params=normalization_params,
+    )
+    if dataset_type == 'ship':
+        return MultiConditionIrregularDataset(data_dirs=data_dirs, **common)
+    if dataset_type == 'cfd_bench':
+        roots, benchmarks, cases = _parse_cfd_dirs(data_dirs)
+        return MultiConditionCFDBenchIrregularDataset(
+            roots=roots, benchmarks=benchmarks, cases=cases, **common,
+        )
+    raise ValueError(f"Unknown dataset type: {dataset_type}")
+
+
+def create_datasets(
+    dataset_type, data_dirs, step_size, train_ratio, seed, multi_condition,
+    prefer_cache=True, rollout_holdout_steps=0,
+):
+    holdout = rollout_holdout_steps if dataset_type == 'ship' else 0
+    if not multi_condition:
+        train_ds = _make_single_dataset(
+            dataset_type, data_dirs[0], step_size, train_ratio, seed, 'train',
+            prefer_cache=prefer_cache, rollout_holdout_steps=holdout,
+        )
+        if dataset_type == 'ship':
+            val_ds = train_ds.clone_for_split('test')
+        else:
+            val_ds = _make_single_dataset(
+                dataset_type, data_dirs[0], step_size, train_ratio, seed, 'test',
+                prefer_cache=prefer_cache, rollout_holdout_steps=holdout,
+                normalization_params=train_ds.get_normalization_params(),
+            )
+        return train_ds, val_ds
+
+    train_ds = _make_multi_dataset(
+        dataset_type, data_dirs, step_size, train_ratio, seed, 'train',
+        rollout_holdout_steps=holdout,
+    )
+    if dataset_type == 'cfd_bench':
+        val_ds = MultiConditionCFDBenchIrregularDataset.from_existing(
+            train_ds, split='test', max_points=train_ds.global_max_points,
+        )
+    else:
+        val_ds = MultiConditionIrregularDataset.from_existing(
+            train_ds, split='test'
+        )
     return train_ds, val_ds
 
 
@@ -248,12 +265,19 @@ def main():
                         help='Logging interval in step-based mode')
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--train_ratio', type=float, default=0.8,
-                        help='Train/val split ratio')
-    parser.add_argument('--seed', type=int, default=42)
+                        help='Train/val split ratio over valid temporal pairs')
+    parser.add_argument('--rollout_holdout_steps', type=int, default=50,
+                        help='Reserved contiguous ShipBench rollout horizon (0 disables)')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Model initialization and training seed')
+    parser.add_argument('--split_seed', type=int, default=None,
+                        help='Dataset split/rollout seed (default: --seed)')
     parser.add_argument('--disable_tqdm', action='store_true', default=False,
                         help='Disable tqdm progress bars (recommended for log redirection)')
     parser.add_argument('--disable_cache', action='store_true', default=False,
                         help='Load CSV timesteps directly instead of flow_cache.npz')
+    parser.add_argument('--num_workers', type=int, default=0,
+                        help='DataLoader worker processes')
     parser.add_argument('--save_dir', type=str, default=None,
                         help='Output directory (default: outputs_<model>)')
 
@@ -271,6 +295,11 @@ def main():
     model_parser.add_argument('--n_experts', type=int, default=3, help='Experts (GNOT)')
 
     args = parser.parse_args()
+    split_seed = args.seed if args.split_seed is None else args.split_seed
+    if args.slice_num < 1:
+        raise ValueError('--slice_num must be positive')
+    if args.num_output_tokens is not None and args.num_output_tokens < 1:
+        raise ValueError('--num_output_tokens must be positive')
 
     set_seed(args.seed)
 
@@ -280,8 +309,10 @@ def main():
     print(f"Dataset type: {args.dataset_type}")
     print(f"Multi-condition: {args.multi_condition}")
     print(f"Data dirs: {args.data_dirs}")
+    print(f"Model seed: {args.seed}; split seed: {split_seed}")
     print(f"Val split: test split from data_dirs (ratio={args.train_ratio})")
     print(f"Prefer cache: {not args.disable_cache}")
+    print(f"Rollout holdout: {args.rollout_holdout_steps if args.dataset_type == 'ship' else 0} steps")
 
     disable_tqdm = bool(args.disable_tqdm or (not sys.stderr.isatty()))
     print(f"Disable tqdm: {disable_tqdm}")
@@ -300,10 +331,12 @@ def main():
     print(f"\nLoading datasets...")
     train_dataset, val_dataset = create_datasets(
         args.dataset_type, args.data_dirs,
-        step_size=1, train_ratio=args.train_ratio, seed=args.seed,
+        step_size=1, train_ratio=args.train_ratio, seed=split_seed,
         multi_condition=args.multi_condition,
         prefer_cache=not args.disable_cache,
+        rollout_holdout_steps=args.rollout_holdout_steps,
     )
+    save_data_protocol(args.save_dir, train_dataset, val_dataset)
 
     # 判断是否为多工况（含 condition_id 输出）
     val_is_multi = isinstance(val_dataset, (MultiConditionIrregularDataset,
@@ -320,14 +353,33 @@ def main():
 
     out_dim = fun_dim
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=0, pin_memory=True,
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=0, pin_memory=True,
-    )
+    loader_kwargs = {
+        'num_workers': args.num_workers,
+        'pin_memory': device.type == 'cuda',
+    }
+    if args.num_workers > 0:
+        loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+
+    if args.multi_condition:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=ConditionBatchSampler(train_dataset, args.batch_size, shuffle=True),
+            **loader_kwargs,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_sampler=ConditionBatchSampler(val_dataset, args.batch_size, shuffle=False),
+            **loader_kwargs,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset, batch_size=args.batch_size, shuffle=True,
+            **loader_kwargs,
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=args.batch_size, shuffle=False,
+            **loader_kwargs,
+        )
 
     model_kwargs = {**base_kwargs}
     if args.model in ['transolver', 'fno', 'upt', 'gnot']:
@@ -362,7 +414,7 @@ def main():
             'n_hidden': args.n_hidden or 128,
             'n_heads': args.n_heads or 4,
             'n_layers': args.n_layers or 2,
-            'num_output_tokens': args.num_output_tokens or 64,
+            'num_output_tokens': 64 if args.num_output_tokens is None else args.num_output_tokens,
         })
     elif args.model == 'gnot':
         model_kwargs.update({
@@ -378,6 +430,15 @@ def main():
 
     criterion = loss_cls()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    run_config = {
+        'args': vars(args),
+        'model_seed': args.seed,
+        'split_seed': split_seed,
+        'resolved_model_kwargs': model_kwargs,
+        'model_parameters': sum(p.numel() for p in model.parameters()),
+    }
+    with open(os.path.join(args.save_dir, 'run_config.json'), 'w', encoding='utf-8') as f:
+        json.dump(run_config, f, indent=2)
 
     if args.max_steps > 0:
         print(f"\nStep-based training: max_steps={args.max_steps}, eval_every={args.eval_every}")
@@ -395,19 +456,19 @@ def main():
 
             step += 1
             pbar.update(1)
-            loss_val = train_one_step(
+            loss_tensor = train_one_step(
                 model, batch, criterion, optimizer, device,
                 multi_condition=args.multi_condition,
             )
-            train_losses_since_eval.append(loss_val)
+            train_losses_since_eval.append(loss_tensor)
 
             if step % args.log_every == 0:
-                pbar.set_postfix(loss=f"{loss_val:.6f}")
+                pbar.set_postfix(loss=f"{loss_tensor.item():.6f}")
 
             if step % args.eval_every != 0 and step != args.max_steps:
                 continue
 
-            train_loss = float(np.mean(train_losses_since_eval)) if train_losses_since_eval else loss_val
+            train_loss = float(torch.stack(train_losses_since_eval).mean().item())
             train_losses_since_eval = []
             val_loss, val_metrics = validate(model, val_loader, criterion, device,
                                              multi_condition=val_is_multi,
@@ -421,6 +482,10 @@ def main():
                 'mae': float(val_metrics['mae']),
                 'mse': float(val_metrics['mse']),
                 'rmse': float(val_metrics['rmse']),
+                'relative_l2': float(val_metrics['relative_l2']),
+                'mae_per_channel': val_metrics['mae_per_channel'],
+                'rmse_per_channel': val_metrics['rmse_per_channel'],
+                'relative_l2_per_channel': val_metrics['relative_l2_per_channel'],
                 'elapsed_sec': float(time.time() - t0),
             }
             metrics_records.append(record)
@@ -453,6 +518,10 @@ def main():
                 'mae': float(val_metrics['mae']),
                 'mse': float(val_metrics['mse']),
                 'rmse': float(val_metrics['rmse']),
+                'relative_l2': float(val_metrics['relative_l2']),
+                'mae_per_channel': val_metrics['mae_per_channel'],
+                'rmse_per_channel': val_metrics['rmse_per_channel'],
+                'relative_l2_per_channel': val_metrics['relative_l2_per_channel'],
                 'elapsed_sec': float(time.time() - t0),
             }
             metrics_records.append(record)
