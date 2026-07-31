@@ -11,8 +11,10 @@ from .trainer import (
 
 from .metrics import (
     compute_metrics,
+    knn_recover,
     MetricsCalculator,
     patches_to_points,
+    recover_points_knn,
 )
 
 __all__ = [
@@ -21,8 +23,10 @@ __all__ = [
     'build_optimizer',
     'build_scheduler',
     'compute_metrics',
+    'knn_recover',
     'MetricsCalculator',
     'patches_to_points',
+    'recover_points_knn',
     'save_checkpoint',
     'load_checkpoint',
     'IrregularTrainer',

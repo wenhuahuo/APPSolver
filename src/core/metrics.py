@@ -1,14 +1,12 @@
-"""
-Metrics calculation for flow field prediction
+"""Point recovery and metrics for flow-field predictions."""
 
-Unified interface for both irregular (points) and patch (flattened patches) formats:
-- Irregular: pred/target are [B, N, C], pass no mask (all points are valid)
-- Patch: convert to [B, N, C] via patches_to_points first, then pass the valid_mask
-"""
+import math
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
-import numpy as np
-from typing import Dict, Optional, Tuple
+
+
+MetricValue = Union[float, List[float]]
 
 
 def patches_to_points(
@@ -24,136 +22,244 @@ def patches_to_points(
     Convert flattened patches [B, P, N*C] back to points format [B, N, C].
 
     The patch tensor may contain concatenated coordinates and flow values
-    (input_dim = coord_dim + flow_dim).  Only the first n_channels (flow)
-    channels are returned so the result is directly comparable with the
-    irregular format output.
-
-    Args:
-        patches:    [B, P, max_points * input_dim] flattened patch tensor
-        quadtree:   QuadTreeMesh with patch point-index information
-        batch_size: B
-        n_points:   total number of mesh points N
-        n_channels: number of flow output channels C (output_dim)
-        input_dim:  channels per point stored in the patch (coord_dim + C)
-        max_points: maximum number of points in any single patch
-
-    Returns:
-        points_values: [B, N, C] flow values at every mesh point
-        valid_mask:    [B, N]  True for points that belong to at least one patch
+    (input_dim = coord_dim + flow_dim). Only the first ``n_channels`` values
+    for each point are returned. ``max_points`` remains part of the public
+    signature for compatibility with existing callers.
     """
+    del max_points  # Padding is already excluded using each patch's point count.
     device = patches.device
-
-    points_values = torch.zeros(batch_size, n_points, n_channels, device=device)
-    valid_mask    = torch.zeros(batch_size, n_points, dtype=torch.bool, device=device)
+    points_values = torch.zeros(
+        batch_size, n_points, n_channels, device=device, dtype=patches.dtype
+    )
+    valid_mask = torch.zeros(batch_size, n_points, dtype=torch.bool, device=device)
 
     for patch_idx, patch in enumerate(quadtree.patches):
         point_indices = patch.points
         n_pts = len(point_indices)
-
-        # Extract the valid (non-padded) portion of this patch
-        patch_flat     = patches[:, patch_idx, :n_pts * input_dim]          # [B, n_pts*input_dim]
-        patch_reshaped = patch_flat.reshape(batch_size, n_pts, input_dim)   # [B, n_pts, input_dim]
-
-        # Keep only the flow channels (first n_channels columns)
-        patch_flows = patch_reshaped[:, :, :n_channels]                     # [B, n_pts, C]
-
-        # Scatter into the full point array using advanced indexing (no Python loop over B)
+        patch_flat = patches[:, patch_idx, : n_pts * input_dim]
+        patch_reshaped = patch_flat.reshape(batch_size, n_pts, input_dim)
+        patch_flows = patch_reshaped[:, :, :n_channels]
         points_values[:, point_indices, :] = patch_flows
-        valid_mask[:, point_indices]        = True
+        valid_mask[:, point_indices] = True
 
     return points_values, valid_mask
+
+
+def recover_points_knn(
+    point_predictions: torch.Tensor,
+    neighbor_indices: torch.Tensor,
+    neighbor_weights: torch.Tensor,
+    sampled_indices: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Recover predictions at all points using a precomputed global k-NN map.
+
+    Args:
+        point_predictions: ``[S, C]`` or ``[B, S, C]`` sampled predictions. If
+            ``sampled_indices`` is omitted, this must instead be a scattered
+            full-size tensor ``[N, C]`` or ``[B, N, C]``.
+        neighbor_indices: ``[N, K]`` or ``[B, N, K]`` neighbor indices in the
+            *full* point indexing (not positions in the compact sampled array).
+        neighbor_weights: weights with the same shape as ``neighbor_indices``.
+            They are normalized per output point.
+        sampled_indices: optional ``[S]`` or ``[B, S]`` full indices of compact
+            predictions. Recovered values at these points are overwritten with
+            the corresponding predictions, preserving them exactly.
+
+    Returns:
+        Recovered predictions shaped ``[N, C]`` or ``[B, N, C]``. The operation
+        uses only PyTorch gather/scatter operations and is differentiable with
+        respect to predictions and weights.
+    """
+    if point_predictions.ndim not in (2, 3):
+        raise ValueError("point_predictions must have shape [S, C] or [B, S, C]")
+    if neighbor_indices.ndim not in (2, 3):
+        raise ValueError("neighbor_indices must have shape [N, K] or [B, N, K]")
+    if neighbor_weights.shape != neighbor_indices.shape:
+        raise ValueError("neighbor_weights must have the same shape as neighbor_indices")
+
+    unbatched = point_predictions.ndim == 2
+    predictions = point_predictions.unsqueeze(0) if unbatched else point_predictions
+    indices = neighbor_indices.unsqueeze(0) if neighbor_indices.ndim == 2 else neighbor_indices
+    weights = neighbor_weights.unsqueeze(0) if neighbor_weights.ndim == 2 else neighbor_weights
+
+    batch_size, n_pred, n_channels = predictions.shape
+    n_points = indices.shape[-2]
+    if indices.shape[0] == 1 and batch_size != 1:
+        indices = indices.expand(batch_size, -1, -1)
+        weights = weights.expand(batch_size, -1, -1)
+    elif indices.shape[0] != batch_size:
+        raise ValueError("neighbor map batch dimension does not match predictions")
+
+    indices = indices.to(device=predictions.device, dtype=torch.long)
+    weights = weights.to(device=predictions.device, dtype=predictions.dtype)
+    if indices.numel() and (indices.min().item() < 0 or indices.max().item() >= n_points):
+        raise ValueError("neighbor_indices contains an out-of-range full point index")
+
+    compact_predictions = None
+    sample_idx = None
+    if sampled_indices is not None:
+        sample_idx = sampled_indices.unsqueeze(0) if sampled_indices.ndim == 1 else sampled_indices
+        if sample_idx.ndim != 2:
+            raise ValueError("sampled_indices must have shape [S] or [B, S]")
+        if sample_idx.shape[0] == 1 and batch_size != 1:
+            sample_idx = sample_idx.expand(batch_size, -1)
+        if sample_idx.shape[0] != batch_size:
+            raise ValueError("sampled_indices batch dimension does not match predictions")
+        sample_idx = sample_idx.to(device=predictions.device, dtype=torch.long)
+        if sample_idx.numel() and (sample_idx.min().item() < 0 or sample_idx.max().item() >= n_points):
+            raise ValueError("sampled_indices contains an out-of-range point index")
+
+        if n_pred == sample_idx.shape[1]:
+            compact_predictions = predictions
+            source = predictions.new_zeros(batch_size, n_points, n_channels).scatter(
+                1, sample_idx.unsqueeze(-1).expand(-1, -1, n_channels), predictions
+            )
+        elif n_pred == n_points:
+            source = predictions
+        else:
+            raise ValueError("compact predictions and sampled_indices have different lengths")
+    elif n_pred == n_points:
+        source = predictions
+    else:
+        raise ValueError("sampled_indices is required for compact sampled predictions")
+
+    batch = torch.arange(batch_size, device=predictions.device)[:, None, None]
+    neighbors = source[batch, indices]  # [B, N, K, C]
+    denominator = weights.sum(dim=-1, keepdim=True)
+    safe_denominator = denominator.clamp_min(torch.finfo(weights.dtype).eps)
+    normalized_weights = weights / safe_denominator
+    recovered = (neighbors * normalized_weights.unsqueeze(-1)).sum(dim=-2)
+
+    if sample_idx is not None:
+        exact = compact_predictions
+        if exact is None:
+            exact = source.gather(1, sample_idx.unsqueeze(-1).expand(-1, -1, n_channels))
+        recovered = recovered.scatter(
+            1, sample_idx.unsqueeze(-1).expand(-1, -1, n_channels), exact
+        )
+
+    return recovered.squeeze(0) if unbatched else recovered
+
+
+# Short, discoverable alias for callers that prefer the operation-first name.
+knn_recover = recover_points_knn
+
+
+class MetricsCalculator:
+    """Accumulate pointwise errors over elements, rather than over batches."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.total_abs_error = 0.0
+        self.total_squared_error = 0.0
+        self.total_target_squared = 0.0
+        self.element_count = 0
+        self.channel_abs_error: Optional[List[float]] = None
+        self.channel_squared_error: Optional[List[float]] = None
+        self.channel_target_squared: Optional[List[float]] = None
+        self.point_count = 0
+
+    def update(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Add ``[B, N, C]`` predictions, optionally at masked valid points."""
+        if pred.shape != target.shape:
+            raise ValueError("pred and target must have identical shapes")
+        if pred.ndim == 0:
+            raise ValueError("pred and target must contain at least one element")
+
+        # A flattened tensor was accepted by the previous implementation and is
+        # still used by one patch-evaluation path; treat it as a single channel.
+        n_channels = pred.shape[-1] if pred.ndim > 1 else 1
+        if self.channel_abs_error is None:
+            self.channel_abs_error = [0.0] * n_channels
+            self.channel_squared_error = [0.0] * n_channels
+            self.channel_target_squared = [0.0] * n_channels
+        elif len(self.channel_abs_error) != n_channels:
+            raise ValueError("channel count changed between metric updates")
+
+        error = (pred.detach() - target.detach()).reshape(-1, n_channels)
+        target_values = target.detach().reshape(-1, n_channels)
+        if mask is not None:
+            expected_shape = pred.shape[:-1] if pred.ndim > 1 else pred.shape
+            if tuple(mask.shape) != tuple(expected_shape):
+                raise ValueError(f"mask must have point shape {tuple(expected_shape)}")
+            valid = mask.detach().to(device=pred.device, dtype=torch.bool).reshape(-1)
+            error = error[valid]
+            target_values = target_values[valid]
+
+        if error.shape[0] == 0:
+            return
+
+        error = error.to(dtype=torch.float64)
+        target_values = target_values.to(dtype=torch.float64)
+        channel_abs = error.abs().sum(dim=0).cpu().tolist()
+        channel_squared = error.square().sum(dim=0).cpu().tolist()
+        channel_target_squared = target_values.square().sum(dim=0).cpu().tolist()
+
+        self.point_count += error.shape[0]
+        self.element_count += error.numel()
+        self.total_abs_error += sum(channel_abs)
+        self.total_squared_error += sum(channel_squared)
+        self.total_target_squared += sum(channel_target_squared)
+        self.channel_abs_error = [a + b for a, b in zip(self.channel_abs_error, channel_abs)]
+        self.channel_squared_error = [a + b for a, b in zip(self.channel_squared_error, channel_squared)]
+        self.channel_target_squared = [
+            a + b for a, b in zip(self.channel_target_squared, channel_target_squared)
+        ]
+
+    @staticmethod
+    def _relative_l2(error_squared: float, target_squared: float) -> float:
+        epsilon = 1e-12
+        return math.sqrt(error_squared) / (math.sqrt(target_squared) + epsilon)
+
+    def compute(self) -> Dict[str, MetricValue]:
+        if self.element_count == 0:
+            return {
+                "mae": 0.0,
+                "mse": 0.0,
+                "rmse": 0.0,
+                "relative_l2": 0.0,
+                "mae_per_channel": [],
+                "rmse_per_channel": [],
+                "relative_l2_per_channel": [],
+            }
+
+        mse = self.total_squared_error / self.element_count
+        assert self.channel_abs_error is not None
+        assert self.channel_squared_error is not None
+        assert self.channel_target_squared is not None
+        return {
+            "mae": self.total_abs_error / self.element_count,
+            "mse": mse,
+            "rmse": math.sqrt(mse),
+            "relative_l2": self._relative_l2(
+                self.total_squared_error, self.total_target_squared
+            ),
+            "mae_per_channel": [value / self.point_count for value in self.channel_abs_error],
+            "rmse_per_channel": [
+                math.sqrt(value / self.point_count) for value in self.channel_squared_error
+            ],
+            "relative_l2_per_channel": [
+                self._relative_l2(error, target)
+                for error, target in zip(
+                    self.channel_squared_error, self.channel_target_squared
+                )
+            ],
+        }
 
 
 def compute_metrics(
     pred: torch.Tensor,
     target: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
-) -> Dict[str, float]:
-    """
-    Compute MAE, MSE and RMSE between pred and target.
-
-    Both irregular and patch paths produce [B, N, C] tensors before calling
-    this function, so the calculation is identical for both.
-
-    Args:
-        pred:   [B, N, C] predicted flow values (normalised space)
-        target: [B, N, C] ground-truth flow values (normalised space)
-        mask:   [B, N] boolean mask; True = valid point.
-                Pass None for irregular data (every point is valid).
-                Pass the mask returned by patches_to_points for patch data.
-
-    Returns:
-        dict with scalar float values for 'mae', 'mse', 'rmse'
-    """
-    if mask is not None:
-        mask_expanded = mask.unsqueeze(-1).expand_as(pred)   # [B, N, C]
-        n_valid = mask_expanded.sum().clamp(min=1)
-        mse = ((pred - target) ** 2 * mask_expanded).sum() / n_valid
-        mae = (torch.abs(pred - target) * mask_expanded).sum() / n_valid
-    else:
-        mse = ((pred - target) ** 2).mean()
-        mae = torch.abs(pred - target).mean()
-
-    return {
-        'mae':  mae.item(),
-        'mse':  mse.item(),
-        'rmse': torch.sqrt(mse).item(),
-    }
-
-
-class MetricsCalculator:
-    """
-    Accumulates per-batch metrics and returns their mean over all batches.
-
-    Usage (irregular):
-        calc = MetricsCalculator()
-        calc.update(pred, target)           # mask=None  →  all points counted
-
-    Usage (patch):
-        calc = MetricsCalculator()
-        calc.update(pred_points, target_points, mask=combined_mask)
-    """
-
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.total_mae = 0.0
-        self.total_mse = 0.0
-        self.n_batches  = 0
-
-    def update(self, pred: torch.Tensor, target: torch.Tensor,
-               mask: Optional[torch.Tensor] = None):
-        """
-        Args:
-            pred:   [B, N, C]
-            target: [B, N, C]
-            mask:   [B, N] or None
-        """
-        m = compute_metrics(pred, target, mask)
-        self.total_mae += m['mae']
-        self.total_mse += m['mse']
-        self.n_batches  += 1
-
-    def compute(self) -> Dict[str, float]:
-        if self.n_batches == 0:
-            return {'mae': 0.0, 'mse': 0.0, 'rmse': 0.0}
-        avg_mae = self.total_mae / self.n_batches
-        avg_mse = self.total_mse / self.n_batches
-        return {
-            'mae':  avg_mae,
-            'mse':  avg_mse,
-            'rmse': float(np.sqrt(avg_mse)),
-        }
-
-
-if __name__ == '__main__':
-    pred   = torch.randn(2, 1000, 4)
-    target = torch.randn(2, 1000, 4)
-    mask   = torch.randint(0, 2, (2, 1000)).bool()
-
-    m = compute_metrics(pred, target, mask)
-    print(f"With mask:    MAE={m['mae']:.4f}, MSE={m['mse']:.4f}, RMSE={m['rmse']:.4f}")
-
-    m2 = compute_metrics(pred, target, None)
-    print(f"Without mask: MAE={m2['mae']:.4f}, MSE={m2['mse']:.4f}, RMSE={m2['rmse']:.4f}")
+) -> Dict[str, MetricValue]:
+    """Compute the same aggregate metrics as :class:`MetricsCalculator`."""
+    calculator = MetricsCalculator()
+    calculator.update(pred, target, mask)
+    return calculator.compute()
