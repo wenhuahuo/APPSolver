@@ -33,7 +33,9 @@ Reference:
   "Point Cloud Neural Operator" – PKU-CMEGroup/NeuralOperator
 """
 
+import hashlib
 import math
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -460,35 +462,33 @@ def build_aux_from_pos(
     node_weights = np.tile(node_weights[:, None], (1, nmeasures)).astype(np.float32)
 
     # ------------------------------------------------------------------
-    # Directed edges: symmetric kNN (exclude self)
+    # Directed edges: kNN (exclude self), preserving the original row order.
     # ------------------------------------------------------------------
-    directed_edges = []
-    for i in range(N):
-        for j in indices[i, 1:]:   # skip self at index 0
-            directed_edges.append([i, j])
-
-    directed_edges = np.array(directed_edges, dtype=np.int64)  # (E, 2)
+    neighbors = np.asarray(indices[:, 1:], dtype=np.int64)
+    neighbor_count = neighbors.shape[1]
+    sources = np.repeat(np.arange(N, dtype=np.int64), neighbor_count)
+    directed_edges = np.column_stack((sources, neighbors.reshape(-1)))
 
     # ------------------------------------------------------------------
-    # Edge gradient weights: pseudo-inverse of displacement matrix
-    # (each row: pinvdx row corresponding to that edge)
+    # Edge gradient weights: batched version of the original per-node SVD.
+    # Chunking bounds temporary memory for large CFDBench cases.
     # ------------------------------------------------------------------
-    edge_gradient_weights = []
-    for i in range(N):
-        nbrs = indices[i, 1:]            # k nearest neighbours
-        dx   = pos[nbrs] - pos[i]        # (k, 2)
-
-        # Moore-Penrose pseudo-inverse (rrank=2 for 2-D domains)
+    edge_gradient_weights = np.empty(
+        (N * neighbor_count, pos.shape[1]), dtype=np.float32
+    )
+    chunk_size = 20000
+    for start in range(0, N, chunk_size):
+        stop = min(start + chunk_size, N)
+        chunk_neighbors = neighbors[start:stop]
+        dx = pos[chunk_neighbors] - pos[start:stop, None, :]
         U, S, Vt = np.linalg.svd(dx, full_matrices=False)
-        rcond     = 1e-3 * S[0] if S[0] > 0 else 1e-12
-        S_inv     = np.where(S > rcond, 1.0 / S, 0.0)
-        pinvdx    = (Vt.T * S_inv) @ U.T   # (2, k)
-
-        # One row of pinvdx per edge from node i
-        for col in range(len(nbrs)):
-            edge_gradient_weights.append(pinvdx[:, col])   # (2,)
-
-    edge_gradient_weights = np.array(edge_gradient_weights, dtype=np.float32)  # (E, 2)
+        rcond = np.where(S[:, 0] > 0, 1e-3 * S[:, 0], 1e-12)
+        S_inv = np.zeros_like(S)
+        np.divide(1.0, S, out=S_inv, where=S > rcond[:, None])
+        pinvdx = (Vt.transpose(0, 2, 1) * S_inv[:, None, :]) @ U.transpose(0, 2, 1)
+        edge_gradient_weights[
+            start * neighbor_count:stop * neighbor_count
+        ] = pinvdx.transpose(0, 2, 1).reshape(-1, pos.shape[1])
 
     return {
         'node_mask':             np.ones((N, 1), dtype=np.int32),
@@ -496,6 +496,87 @@ def build_aux_from_pos(
         'directed_edges':        directed_edges,
         'edge_gradient_weights': edge_gradient_weights,
     }
+
+
+def _pcno_reference_hash(pos: np.ndarray) -> str:
+    contiguous = np.ascontiguousarray(pos, dtype=np.float32)
+    return hashlib.sha256(contiguous.view(np.uint8)).hexdigest()
+
+
+def save_pcno_aux_cache(
+    cache_path: str,
+    aux: dict,
+    pos: np.ndarray,
+    k_neighbors: int,
+    nmeasures: int,
+) -> None:
+    """Atomically save geometry-bound PCNO auxiliary arrays."""
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    temporary_path = f"{cache_path}.tmp-{os.getpid()}"
+    with open(temporary_path, 'wb') as handle:
+        np.savez(
+            handle,
+            **aux,
+            reference_hash=np.asarray(_pcno_reference_hash(pos)),
+            k_neighbors=np.asarray(k_neighbors, dtype=np.int64),
+            nmeasures=np.asarray(nmeasures, dtype=np.int64),
+        )
+    os.replace(temporary_path, cache_path)
+
+
+def load_pcno_aux_cache(
+    cache_path: str,
+    pos: np.ndarray,
+    k_neighbors: int,
+    nmeasures: int,
+) -> dict:
+    """Load a PCNO auxiliary cache and verify its geometry and configuration."""
+    if not os.path.isfile(cache_path):
+        raise FileNotFoundError(f"Missing PCNO auxiliary cache: {cache_path}")
+
+    required = {
+        'node_mask', 'node_weights', 'directed_edges',
+        'edge_gradient_weights', 'reference_hash', 'k_neighbors', 'nmeasures',
+    }
+    with np.load(cache_path, allow_pickle=False) as data:
+        missing = required.difference(data.files)
+        if missing:
+            raise ValueError(f"PCNO auxiliary cache missing {sorted(missing)}: {cache_path}")
+        cached_k = int(data['k_neighbors'])
+        cached_nmeasures = int(data['nmeasures'])
+        cached_hash = str(data['reference_hash'])
+        aux = {
+            key: data[key]
+            for key in (
+                'node_mask', 'node_weights', 'directed_edges',
+                'edge_gradient_weights',
+            )
+        }
+
+    if cached_k != k_neighbors or cached_nmeasures != nmeasures:
+        raise ValueError(
+            f"PCNO auxiliary cache configuration mismatch: {cache_path} "
+            f"has k={cached_k}, nmeasures={cached_nmeasures}; "
+            f"requested k={k_neighbors}, nmeasures={nmeasures}"
+        )
+    if cached_hash != _pcno_reference_hash(pos):
+        raise ValueError(f"PCNO auxiliary cache geometry mismatch: {cache_path}")
+
+    point_count = len(pos)
+    edge_count = point_count * min(k_neighbors, max(0, point_count - 1))
+    expected_shapes = {
+        'node_mask': (point_count, 1),
+        'node_weights': (point_count, nmeasures),
+        'directed_edges': (edge_count, 2),
+        'edge_gradient_weights': (edge_count, pos.shape[1]),
+    }
+    for key, shape in expected_shapes.items():
+        if aux[key].shape != shape:
+            raise ValueError(
+                f"PCNO auxiliary cache shape mismatch for {key}: "
+                f"expected {shape}, found {aux[key].shape} in {cache_path}"
+            )
+    return aux
 
 
 def collate_aux_batch(aux_list: List[dict]) -> dict:

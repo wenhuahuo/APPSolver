@@ -20,9 +20,11 @@ from src.datasets.shipBench import IrregularFlowFieldDataset, MultiConditionIrre
 from src.datasets.cfdBench import CFDBenchIrregularDataset, MultiConditionCFDBenchIrregularDataset
 from src.models.irregular.pcno import (
     PCNO, PCNOLoss,
-    compute_fourier_modes, build_aux_from_pos, collate_aux_batch,
+    compute_fourier_modes, build_aux_from_pos, load_pcno_aux_cache,
 )
 from src.core.metrics import MetricsCalculator
+from src.datasets.samplers import ConditionBatchSampler
+from src.datasets.temporal import save_data_protocol
 
 
 # ---------------------------------------------------------------------------
@@ -38,39 +40,69 @@ class PCNODataset(Dataset):
     For multi-condition datasets, we precompute one aux per condition.
     """
 
-    def __init__(self, base_dataset, k_neighbors: int = 8, nmeasures: int = 1):
+    def __init__(
+        self, base_dataset, k_neighbors: int = 8, nmeasures: int = 1,
+        aux_by_condition=None, aux_cache_filename=None,
+    ):
         self.base = base_dataset
+        if aux_by_condition is not None:
+            self.aux_by_condition = aux_by_condition
+            return
         self.aux_by_condition = {}
 
         is_multi = isinstance(
             base_dataset,
             (MultiConditionIrregularDataset, MultiConditionCFDBenchIrregularDataset),
         )
+        if aux_cache_filename and not isinstance(
+            base_dataset,
+            (CFDBenchIrregularDataset, MultiConditionCFDBenchIrregularDataset),
+        ):
+            raise ValueError('PCNO auxiliary cache is only supported for CFDBench')
 
         if is_multi:
-            print(f"  Precomputing PCNO aux data for multi-condition dataset "
+            action = 'Loading' if aux_cache_filename else 'Precomputing'
+            print(f"  {action} PCNO aux data for multi-condition dataset "
                   f"({base_dataset.num_conditions} conditions, {len(base_dataset)} samples)")
             for cond_id in range(base_dataset.num_conditions):
                 sub_ds = base_dataset.get_sub_dataset(cond_id)
                 ref_pos = sub_ds.coords[0]
-                if ref_pos.shape[0] > base_dataset.global_max_points:
-                    ref_pos = ref_pos[:base_dataset.global_max_points]
-
                 print(f"    condition={cond_id}: N={ref_pos.shape[0]}, k={k_neighbors}")
-                self.aux_by_condition[cond_id] = build_aux_from_pos(
+                if aux_cache_filename:
+                    cache_path = os.path.join(
+                        sub_ds.root, sub_ds.benchmark, sub_ds.case,
+                        aux_cache_filename,
+                    )
+                    aux = load_pcno_aux_cache(
+                        cache_path, ref_pos, k_neighbors, nmeasures,
+                    )
+                else:
+                    aux = build_aux_from_pos(
+                        ref_pos,
+                        k_neighbors=k_neighbors,
+                        nmeasures=nmeasures,
+                    )
+                self.aux_by_condition[cond_id] = aux
+        else:
+            ref_pos = base_dataset.coords[0]
+            if aux_cache_filename:
+                if not isinstance(base_dataset, CFDBenchIrregularDataset):
+                    raise ValueError('PCNO auxiliary cache is only supported for CFDBench')
+                cache_path = os.path.join(
+                    base_dataset.root, base_dataset.benchmark, base_dataset.case,
+                    aux_cache_filename,
+                )
+                self.aux_by_condition[0] = load_pcno_aux_cache(
+                    cache_path, ref_pos, k_neighbors, nmeasures,
+                )
+            else:
+                print(f"  Precomputing PCNO aux data for {len(base_dataset)} samples "
+                      f"(N={ref_pos.shape[0]}, k={k_neighbors}) ...")
+                self.aux_by_condition[0] = build_aux_from_pos(
                     ref_pos,
                     k_neighbors=k_neighbors,
                     nmeasures=nmeasures,
                 )
-        else:
-            ref_pos = base_dataset.coords[0]
-            print(f"  Precomputing PCNO aux data for {len(base_dataset)} samples "
-                  f"(N={ref_pos.shape[0]}, k={k_neighbors}) ...")
-            self.aux_by_condition[0] = build_aux_from_pos(
-                ref_pos,
-                k_neighbors=k_neighbors,
-                nmeasures=nmeasures,
-            )
 
     def __len__(self):
         return len(self.base)
@@ -85,8 +117,7 @@ class PCNODataset(Dataset):
             pos, fx, y = sample
             cond_id_int = 0
 
-        aux = self.aux_by_condition[cond_id_int]
-        return pos, fx, y, aux
+        return pos, fx, y, cond_id_int
 
 
 def set_seed(seed):
@@ -97,15 +128,31 @@ def set_seed(seed):
 
 
 def pcno_collate_fn(batch):
-    """Custom collate: stacks (pos, fx, y) normally; pads edge arrays."""
-    pos_list, fx_list, y_list, aux_list = zip(*batch)
+    """Stack one same-condition batch and retain its geometry identifier."""
+    pos_list, fx_list, y_list, condition_ids = zip(*batch)
+    return (
+        torch.stack(pos_list),
+        torch.stack(fx_list),
+        torch.stack(y_list),
+        int(condition_ids[0]),
+    )
 
-    pos = torch.stack(pos_list)   # (B, N, 2)
-    fx  = torch.stack(fx_list)    # (B, N, C)
-    y   = torch.stack(y_list)     # (B, N, C)
 
-    aux_batch = collate_aux_batch(list(aux_list))
-    return pos, fx, y, aux_batch
+def move_aux_to_device(aux_by_condition, device):
+    return {
+        condition_id: {
+            key: torch.from_numpy(value).to(device)
+            for key, value in aux.items()
+        }
+        for condition_id, aux in aux_by_condition.items()
+    }
+
+
+def expand_aux(aux, batch_size):
+    return {
+        key: value.unsqueeze(0).expand(batch_size, *value.shape)
+        for key, value in aux.items()
+    }
 
 
 def _init_metrics_csv(csv_path):
@@ -114,8 +161,9 @@ def _init_metrics_csv(csv_path):
             f,
             fieldnames=[
                 'mode', 'epoch', 'step', 'train_loss',
-                'val_loss', 'mae', 'mse', 'rmse', 'elapsed_sec'
-            ]
+                'val_loss', 'mae', 'mse', 'rmse', 'relative_l2', 'elapsed_sec'
+            ],
+            extrasaction='ignore',
         )
         writer.writeheader()
 
@@ -126,8 +174,9 @@ def _append_metrics_csv(csv_path, row):
             f,
             fieldnames=[
                 'mode', 'epoch', 'step', 'train_loss',
-                'val_loss', 'mae', 'mse', 'rmse', 'elapsed_sec'
-            ]
+                'val_loss', 'mae', 'mse', 'rmse', 'relative_l2', 'elapsed_sec'
+            ],
+            extrasaction='ignore',
         )
         writer.writerow(row)
 
@@ -136,22 +185,26 @@ def _append_metrics_csv(csv_path, row):
 # Train / validate
 # ---------------------------------------------------------------------------
 
-def train_epoch(model, dataloader, criterion, optimizer, device, disable_tqdm=False):
+def train_epoch(
+    model, dataloader, criterion, optimizer, device, aux_by_condition,
+    disable_tqdm=False,
+):
     model.train()
     total_loss = 0
     n_samples  = 0
 
-    for pos, fx, target, aux in tqdm(dataloader, desc="Training", disable=disable_tqdm):
-        pos    = pos.to(device)
-        fx     = fx.to(device)
-        target = target.to(device)
+    for pos, fx, target, condition_id in tqdm(dataloader, desc="Training", disable=disable_tqdm):
+        pos = pos.to(device, non_blocking=True)
+        fx = fx.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
 
-        node_weights          = aux['node_weights'].to(device)
-        directed_edges        = aux['directed_edges'].to(device)
-        edge_gradient_weights = aux['edge_gradient_weights'].to(device)
-        node_mask             = aux['node_mask'].to(device)
+        aux = expand_aux(aux_by_condition[condition_id], pos.size(0))
+        node_weights = aux['node_weights']
+        directed_edges = aux['directed_edges']
+        edge_gradient_weights = aux['edge_gradient_weights']
+        node_mask = aux['node_mask']
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         pred = model(pos, fx, node_weights, directed_edges,
                      edge_gradient_weights, node_mask)
@@ -166,21 +219,25 @@ def train_epoch(model, dataloader, criterion, optimizer, device, disable_tqdm=Fa
     return total_loss / n_samples
 
 
-def train_one_step(model, batch, criterion, optimizer, optimizer_inv_L, device):
+def train_one_step(
+    model, batch, criterion, optimizer, optimizer_inv_L, device,
+    aux_by_condition,
+):
     model.train()
-    pos, fx, target, aux = batch
-    pos = pos.to(device)
-    fx = fx.to(device)
-    target = target.to(device)
+    pos, fx, target, condition_id = batch
+    pos = pos.to(device, non_blocking=True)
+    fx = fx.to(device, non_blocking=True)
+    target = target.to(device, non_blocking=True)
 
-    node_weights = aux['node_weights'].to(device)
-    directed_edges = aux['directed_edges'].to(device)
-    edge_gradient_weights = aux['edge_gradient_weights'].to(device)
-    node_mask = aux['node_mask'].to(device)
+    aux = expand_aux(aux_by_condition[condition_id], pos.size(0))
+    node_weights = aux['node_weights']
+    directed_edges = aux['directed_edges']
+    edge_gradient_weights = aux['edge_gradient_weights']
+    node_mask = aux['node_mask']
 
-    optimizer.zero_grad()
+    optimizer.zero_grad(set_to_none=True)
     if optimizer_inv_L:
-        optimizer_inv_L.zero_grad()
+        optimizer_inv_L.zero_grad(set_to_none=True)
 
     pred = model(pos, fx, node_weights, directed_edges,
                  edge_gradient_weights, node_mask)
@@ -189,25 +246,28 @@ def train_one_step(model, batch, criterion, optimizer, optimizer_inv_L, device):
     optimizer.step()
     if optimizer_inv_L:
         optimizer_inv_L.step()
-    return float(loss.item())
+    return loss.detach()
 
 
-def validate(model, dataloader, criterion, device, disable_tqdm=False):
+def validate(
+    model, dataloader, criterion, device, aux_by_condition, disable_tqdm=False
+):
     model.eval()
     total_loss   = 0
     n_samples    = 0
     metrics_calc = MetricsCalculator()
 
     with torch.no_grad():
-        for pos, fx, target, aux in tqdm(dataloader, desc="Validation", disable=disable_tqdm):
-            pos    = pos.to(device)
-            fx     = fx.to(device)
-            target = target.to(device)
+        for pos, fx, target, condition_id in tqdm(dataloader, desc="Validation", disable=disable_tqdm):
+            pos = pos.to(device, non_blocking=True)
+            fx = fx.to(device, non_blocking=True)
+            target = target.to(device, non_blocking=True)
 
-            node_weights          = aux['node_weights'].to(device)
-            directed_edges        = aux['directed_edges'].to(device)
-            edge_gradient_weights = aux['edge_gradient_weights'].to(device)
-            node_mask             = aux['node_mask'].to(device)
+            aux = expand_aux(aux_by_condition[condition_id], pos.size(0))
+            node_weights = aux['node_weights']
+            directed_edges = aux['directed_edges']
+            edge_gradient_weights = aux['edge_gradient_weights']
+            node_mask = aux['node_mask']
 
             pred = model(pos, fx, node_weights, directed_edges,
                          edge_gradient_weights, node_mask)
@@ -234,87 +294,80 @@ def _parse_cfd_dirs(data_dirs):
     return roots, benchmarks, cases
 
 
-def _make_single_dataset(dataset_type, data_dir, step_size, train_ratio, seed, split):
+def _make_single_dataset(
+    dataset_type, data_dir, step_size, train_ratio, seed, split,
+    rollout_holdout_steps=0, normalization_params=None,
+):
+    common = dict(
+        step_size=step_size, train_ratio=train_ratio, seed=seed, normalize=True,
+        rollout_holdout_steps=rollout_holdout_steps,
+        normalization_params=normalization_params,
+    )
     if dataset_type == 'ship':
-        ds = IrregularFlowFieldDataset(
-            data_dir=data_dir,
-            step_size=step_size,
-            train_ratio=train_ratio,
-            seed=seed,
-            normalize=True,
-        )
-        ds.set_split(split)
-        return ds
-
-    if dataset_type == 'cfd_bench':
+        ds = IrregularFlowFieldDataset(data_dir=data_dir, **common)
+    elif dataset_type == 'cfd_bench':
         roots, benchmarks, cases = _parse_cfd_dirs([data_dir])
         ds = CFDBenchIrregularDataset(
-            root=roots[0],
-            benchmark=benchmarks[0],
-            case=cases[0],
-            step_size=step_size,
-            train_ratio=train_ratio,
-            seed=seed,
-            normalize=True,
+            root=roots[0], benchmark=benchmarks[0], case=cases[0], **common,
         )
-        ds.set_split(split)
-        return ds
+    else:
+        raise ValueError(f"Unknown dataset type: {dataset_type}")
+    ds.set_split(split)
+    return ds
 
-    raise ValueError(f"Unknown dataset type: {dataset_type}")
 
-
-def _make_multi_dataset(dataset_type, data_dirs, step_size, train_ratio, seed, split):
+def _make_multi_dataset(
+    dataset_type, data_dirs, step_size, train_ratio, seed, split,
+    rollout_holdout_steps=0, normalization_params=None,
+):
+    common = dict(
+        step_size=step_size, train_ratio=train_ratio, seed=seed,
+        normalize=True, split=split,
+        rollout_holdout_steps=rollout_holdout_steps,
+        normalization_params=normalization_params,
+    )
     if dataset_type == 'ship':
-        return MultiConditionIrregularDataset(
-            data_dirs=data_dirs,
-            step_size=step_size,
-            train_ratio=train_ratio,
-            seed=seed,
-            normalize=True,
-            split=split,
-        )
-
+        return MultiConditionIrregularDataset(data_dirs=data_dirs, **common)
     if dataset_type == 'cfd_bench':
         roots, benchmarks, cases = _parse_cfd_dirs(data_dirs)
         return MultiConditionCFDBenchIrregularDataset(
-            roots=roots,
-            benchmarks=benchmarks,
-            cases=cases,
-            step_size=step_size,
-            train_ratio=train_ratio,
-            seed=seed,
-            normalize=True,
-            split=split,
+            roots=roots, benchmarks=benchmarks, cases=cases, **common,
         )
-
     raise ValueError(f"Unknown dataset type: {dataset_type}")
 
 
-def create_datasets(dataset_type, data_dirs, step_size, train_ratio, seed, multi_condition):
+def create_datasets(
+    dataset_type, data_dirs, step_size, train_ratio, seed, multi_condition,
+    rollout_holdout_steps=0,
+):
+    holdout = rollout_holdout_steps if dataset_type == 'ship' else 0
     if not multi_condition:
         train_ds = _make_single_dataset(
-            dataset_type, data_dirs[0], step_size, train_ratio, seed, 'train'
+            dataset_type, data_dirs[0], step_size, train_ratio, seed, 'train',
+            rollout_holdout_steps=holdout,
         )
-        val_ds = _make_single_dataset(
-            dataset_type, data_dirs[0], step_size, train_ratio, seed, 'test'
-        )
+        if dataset_type == 'ship':
+            val_ds = train_ds.clone_for_split('test')
+        else:
+            val_ds = _make_single_dataset(
+                dataset_type, data_dirs[0], step_size, train_ratio, seed, 'test',
+                rollout_holdout_steps=holdout,
+                normalization_params=train_ds.get_normalization_params(),
+            )
         return train_ds, val_ds
 
     train_ds = _make_multi_dataset(
-        dataset_type, data_dirs, step_size, train_ratio, seed, 'train'
+        dataset_type, data_dirs, step_size, train_ratio, seed, 'train',
+        rollout_holdout_steps=holdout,
     )
-
     if dataset_type == 'cfd_bench':
         val_ds = MultiConditionCFDBenchIrregularDataset.from_existing(
-            train_ds,
-            split='test',
-            max_points=train_ds.global_max_points,
+            train_ds, split='test', max_points=train_ds.global_max_points,
         )
     else:
-        val_ds = _make_multi_dataset(
-            dataset_type, data_dirs, step_size, train_ratio, seed, 'test'
+        val_ds = MultiConditionIrregularDataset.from_existing(
+            train_ds, split='test'
         )
-
     return train_ds, val_ds
 
 
@@ -356,9 +409,17 @@ def main():
     parser.add_argument('--k_neighbors', type=int,   default=8,
                         help='k-NN neighbours for graph construction')
     parser.add_argument('--train_ratio', type=float, default=0.8)
+    parser.add_argument('--rollout_holdout_steps', type=int, default=50,
+                        help='Reserved contiguous ShipBench rollout horizon (0 disables)')
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--split_seed', type=int, default=None,
+                        help='Dataset split seed (default: --seed)')
+    parser.add_argument('--aux_cache_filename', type=str, default=None,
+                        help='Required per-case PCNO auxiliary cache for CFDBench')
     parser.add_argument('--disable_tqdm', action='store_true', default=False,
                         help='Disable tqdm progress bars (recommended for log redirection)')
+    parser.add_argument('--num_workers', type=int, default=0,
+                        help='DataLoader worker processes')
     parser.add_argument('--save_dir',    type=str,
                         default='outputs_pcno', help='Output directory')
     args = parser.parse_args()
@@ -367,6 +428,7 @@ def main():
         args.data_dirs = [args.data_dir]
     if len(args.data_dirs) > 1 and not args.multi_condition:
         raise ValueError('Multiple --data_dirs require --multi_condition')
+    split_seed = args.seed if args.split_seed is None else args.split_seed
 
     set_seed(args.seed)
 
@@ -375,6 +437,8 @@ def main():
     print(f"Dataset type: {args.dataset_type}")
     print(f"Multi-condition: {args.multi_condition}")
     print(f"Data dirs: {args.data_dirs}")
+    print(f"Model seed: {args.seed}; split seed: {split_seed}")
+    print(f"Rollout holdout: {args.rollout_holdout_steps if args.dataset_type == 'ship' else 0} steps")
 
     disable_tqdm = bool(args.disable_tqdm or (not sys.stderr.isatty()))
     print(f"Disable tqdm: {disable_tqdm}")
@@ -395,9 +459,11 @@ def main():
         args.data_dirs,
         1,
         args.train_ratio,
-        args.seed,
+        split_seed,
         args.multi_condition,
+        rollout_holdout_steps=args.rollout_holdout_steps,
     )
+    save_data_protocol(args.save_dir, train_base, val_base)
 
     if args.multi_condition:
         print(f"Train dataset: {len(train_base)} samples "
@@ -419,8 +485,6 @@ def main():
         for cond_id in range(train_base.num_conditions):
             sub_ds = train_base.get_sub_dataset(cond_id)
             pos = sub_ds.coords[0]
-            if pos.shape[0] > train_base.global_max_points:
-                pos = pos[:train_base.global_max_points]
             min_x = min(min_x, float(pos[..., 0].min()))
             max_x = max(max_x, float(pos[..., 0].max()))
             min_y = min(min_y, float(pos[..., 1].min()))
@@ -440,20 +504,48 @@ def main():
     # Wrap with PCNO aux
     # ------------------------------------------------------------------
     print("Building PCNO aux for train split ...")
-    train_dataset = PCNODataset(train_base, k_neighbors=args.k_neighbors,
-                                nmeasures=args.nmeasures)
-    print("Building PCNO aux for val split ...")
-    val_dataset   = PCNODataset(val_base,   k_neighbors=args.k_neighbors,
-                                nmeasures=args.nmeasures)
+    train_dataset = PCNODataset(
+        train_base,
+        k_neighbors=args.k_neighbors,
+        nmeasures=args.nmeasures,
+        aux_cache_filename=args.aux_cache_filename,
+    )
+    print("Reusing PCNO aux for val split ...")
+    val_dataset = PCNODataset(
+        val_base, aux_by_condition=train_dataset.aux_by_condition
+    )
+    aux_by_condition = move_aux_to_device(
+        train_dataset.aux_by_condition, device
+    )
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=0, collate_fn=pcno_collate_fn, pin_memory=False,
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=0, collate_fn=pcno_collate_fn, pin_memory=False,
-    )
+    loader_kwargs = {
+        'num_workers': args.num_workers,
+        'collate_fn': pcno_collate_fn,
+        'pin_memory': device.type == 'cuda',
+    }
+    if args.num_workers > 0:
+        loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+
+    if args.multi_condition:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=ConditionBatchSampler(train_base, args.batch_size, shuffle=True),
+            **loader_kwargs,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_sampler=ConditionBatchSampler(val_base, args.batch_size, shuffle=False),
+            **loader_kwargs,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset, batch_size=args.batch_size, shuffle=True,
+            **loader_kwargs,
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=args.batch_size, shuffle=False,
+            **loader_kwargs,
+        )
 
     # ------------------------------------------------------------------
     # Build model
@@ -473,7 +565,16 @@ def main():
         nmeasures=args.nmeasures,
     ).to(device)
 
-    print(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
+    model_params = sum(p.numel() for p in model.parameters())
+    print(f"Model created with {model_params:,} parameters")
+    run_config = vars(args).copy()
+    run_config.update(
+        model_seed=args.seed,
+        resolved_split_seed=split_seed,
+        model_params=model_params,
+    )
+    with open(os.path.join(args.save_dir, 'run_config.json'), 'w', encoding='utf-8') as f:
+        json.dump(run_config, f, indent=2)
 
     criterion = PCNOLoss()
     optimizer = torch.optim.Adam(model.normal_params, lr=args.lr)
@@ -521,21 +622,25 @@ def main():
 
             step += 1
             pbar.update(1)
-            loss_val = train_one_step(
-                model, batch, criterion, optimizer, optimizer_inv_L, device
+            loss_tensor = train_one_step(
+                model, batch, criterion, optimizer, optimizer_inv_L, device,
+                aux_by_condition,
             )
             scheduler.step()
-            train_losses_since_eval.append(loss_val)
+            train_losses_since_eval.append(loss_tensor)
 
             if step % args.log_every == 0:
-                pbar.set_postfix(loss=f"{loss_val:.6f}")
+                pbar.set_postfix(loss=f"{loss_tensor.item():.6f}")
 
             if step % args.eval_every != 0 and step != args.max_steps:
                 continue
 
-            train_loss = float(np.mean(train_losses_since_eval)) if train_losses_since_eval else loss_val
+            train_loss = float(torch.stack(train_losses_since_eval).mean().item())
             train_losses_since_eval = []
-            val_loss, val_metrics = validate(model, val_loader, criterion, device, disable_tqdm=disable_tqdm)
+            val_loss, val_metrics = validate(
+                model, val_loader, criterion, device, aux_by_condition,
+                disable_tqdm=disable_tqdm,
+            )
             record = {
                 'mode': 'step',
                 'epoch': -1,
@@ -545,6 +650,10 @@ def main():
                 'mae': float(val_metrics['mae']),
                 'mse': float(val_metrics['mse']),
                 'rmse': float(val_metrics['rmse']),
+                'relative_l2': float(val_metrics['relative_l2']),
+                'mae_per_channel': val_metrics['mae_per_channel'],
+                'rmse_per_channel': val_metrics['rmse_per_channel'],
+                'relative_l2_per_channel': val_metrics['relative_l2_per_channel'],
                 'elapsed_sec': float(time.time() - t0),
             }
             metrics_records.append(record)
@@ -560,13 +669,19 @@ def main():
         for epoch in range(args.epochs):
             print(f"\nEpoch {epoch+1}/{args.epochs}")
 
-            train_loss = train_epoch(model, train_loader, criterion, optimizer, device, disable_tqdm=disable_tqdm)
+            train_loss = train_epoch(
+                model, train_loader, criterion, optimizer, device,
+                aux_by_condition, disable_tqdm=disable_tqdm,
+            )
             if optimizer_inv_L:
                 optimizer_inv_L.step()
                 optimizer_inv_L.zero_grad()
             print(f"Train Loss: {train_loss:.6f}")
 
-            val_loss, val_metrics = validate(model, val_loader, criterion, device, disable_tqdm=disable_tqdm)
+            val_loss, val_metrics = validate(
+                model, val_loader, criterion, device, aux_by_condition,
+                disable_tqdm=disable_tqdm,
+            )
             record = {
                 'mode': 'epoch',
                 'epoch': epoch + 1,
@@ -576,6 +691,10 @@ def main():
                 'mae': float(val_metrics['mae']),
                 'mse': float(val_metrics['mse']),
                 'rmse': float(val_metrics['rmse']),
+                'relative_l2': float(val_metrics['relative_l2']),
+                'mae_per_channel': val_metrics['mae_per_channel'],
+                'rmse_per_channel': val_metrics['rmse_per_channel'],
+                'relative_l2_per_channel': val_metrics['relative_l2_per_channel'],
                 'elapsed_sec': float(time.time() - t0),
             }
             metrics_records.append(record)
