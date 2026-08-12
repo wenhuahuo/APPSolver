@@ -217,7 +217,7 @@ def render_overview() -> None:
             ("网格点规模", f"{total_points / 1000:.0f}k", "六工况参考点合计"),
         ]
     )
-    section("WORKFLOW", "端到端科研模型工作台", "所有模块围绕已有 APPSolver 与神经算子训练脚本构建，不引入 cfdBench。")
+    section("WORKFLOW", "端到端科研模型工作台", "所有模块围绕已有 APPSolver 与神经算子训练脚本构建。")
     cols = st.columns(4)
     steps = [
         ("01", "物理信息建模", "APP 几何划分、FNO 频域先验与 PCNO 点云邻域。"),
@@ -326,10 +326,6 @@ def render_modeling() -> None:
         for title, text in explanations[model]:
             info_card(title, text)
             st.write("")
-        st.markdown(
-            "<div class='notice'>本页将“物理信息网络建模”落实为已有代码可执行的物理归纳偏置与超参数配置；不声称实现 PINN 方程残差。</div>",
-            unsafe_allow_html=True,
-        )
 
 
 def current_training_config() -> TrainingConfig:
@@ -405,7 +401,7 @@ def render_training() -> None:
         st.caption("模型专用参数取自“物理信息建模”页面；可在启动前返回调整。")
 
     with right:
-        section("EXECUTION", "运行计划", "训练以独立本地进程运行，产物写入 outputs/tdm_demo（已被 git 忽略）。")
+        section("EXECUTION", "运行计划", "训练以独立本地进程运行，产物写入 outputs/tdm_demo。")
         if config.conditions:
             preview_dir = OUTPUT_ROOT / "<timestamp_model>"
             command = build_training_command(config, preview_dir)

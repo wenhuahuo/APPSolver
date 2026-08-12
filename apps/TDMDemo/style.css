@@ -15,6 +15,7 @@
   border-right: 0;
 }
 [data-testid="stSidebar"] * { color: #eef7fb; }
+[data-testid="stSidebar"] [data-testid="stCode"] * { color: #16324f !important; }
 [data-testid="stSidebar"] [data-testid="stRadio"] label {
   padding: .48rem .6rem; border-radius: 8px;
 }
