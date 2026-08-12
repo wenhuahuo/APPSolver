@@ -373,6 +373,26 @@ def render_training() -> None:
             default=condition_keys()[:2],
             key="train_conditions",
         )
+        selected_model = st.session_state.get("model_choice", "app_transformer")
+        with st.expander("模型专用训练参数", expanded=True):
+            if selected_model == "app_transformer":
+                p1, p2 = st.columns(2)
+                p1.number_input("Patch 容量", 64, 512, 256, 32, key="patch_size")
+                p2.slider("下采样比例", 0.2, 1.0, 0.6, 0.05, key="downsample_ratio")
+                p1.number_input("d_model", 32, 256, 56, 8, key="d_model")
+                p2.number_input("注意力头数", 1, 16, 4, 1, key="attention_heads")
+                st.number_input("编码层数", 1, 10, 4, 1, key="model_layers")
+            elif selected_model == "fno":
+                p1, p2 = st.columns(2)
+                p1.number_input("Fourier modes", 2, 20, 8, 1, key="fourier_modes")
+                p2.number_input("隐层宽度", 16, 128, 32, 8, key="hidden_width")
+                st.number_input("谱卷积层数", 1, 10, 5, 1, key="model_layers")
+            else:
+                p1, p2 = st.columns(2)
+                p1.number_input("Fourier modes", 2, 16, 4, 1, key="fourier_modes")
+                p2.number_input("k-NN 邻居数", 4, 24, 8, 1, key="neighbors")
+                p1.number_input("算子宽度", 16, 128, 64, 8, key="hidden_width")
+                p2.number_input("W + K + D 层数", 1, 8, 4, 1, key="model_layers")
         c1, c2 = st.columns(2)
         c1.number_input("Batch size", 1, 16, 2, 1, key="batch_size")
         c2.number_input("最大训练步数", 10, 100000, 1000, 100, key="max_steps")
@@ -509,9 +529,14 @@ def render_prediction() -> None:
                 results, total = predictor.rollout(source_step, allowed_horizon)
                 st.session_state.rollout_results = (results, total, threshold)
                 st.session_state.single_result = results[0]
+            st.session_state.result_condition = condition
 
     with workspace:
-        result = st.session_state.get("single_result")
+        result = (
+            st.session_state.get("single_result")
+            if st.session_state.get("result_condition") == condition
+            else None
+        )
         rollout_data = st.session_state.get("rollout_results")
         if result is None:
             section("OUTPUT", "等待计算", "配置左侧任务后开始单步或多步预报。")
