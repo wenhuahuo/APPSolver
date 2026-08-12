@@ -247,11 +247,20 @@ def read_job() -> dict[str, Any] | None:
     if not path.is_file():
         return None
     job = json.loads(path.read_text(encoding="utf-8"))
+    pid = int(job["pid"])
     try:
-        os.kill(int(job["pid"]), 0)
-        status = "running"
-    except (OSError, ProcessLookupError):
+        finished_pid, _return_code = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        finished_pid = 0
+
+    if finished_pid == pid:
         status = "finished"
+    else:
+        try:
+            os.kill(pid, 0)
+            status = "running"
+        except (OSError, ProcessLookupError):
+            status = "finished"
     job["status"] = status
     return job
 

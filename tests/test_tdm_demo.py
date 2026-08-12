@@ -3,11 +3,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import apps.TDMDemo.backend as backend
 from apps.TDMDemo.backend import (
     TrainingConfig,
     build_training_command,
     condition_summary,
     discover_conditions,
+    read_job,
     result_to_csv,
 )
 
@@ -52,6 +54,25 @@ def test_training_command_uses_existing_ship_workflows(model, script, model_flag
     assert "cfd" not in " ".join(command).lower()
     if model_flag is not None:
         assert command[command.index("--model") + 1] == model_flag
+
+
+def test_read_job_reaps_finished_child(monkeypatch, tmp_path):
+    job_file = tmp_path / "active_job.json"
+    job_file.write_text('{"pid": 123, "status": "running"}', encoding="utf-8")
+    monkeypatch.setattr(backend, "OUTPUT_ROOT", tmp_path)
+    monkeypatch.setattr(backend.os, "waitpid", lambda pid, options: (pid, 0))
+
+    assert read_job()["status"] == "finished"
+
+
+def test_read_job_keeps_live_child_running(monkeypatch, tmp_path):
+    job_file = tmp_path / "active_job.json"
+    job_file.write_text('{"pid": 123, "status": "running"}', encoding="utf-8")
+    monkeypatch.setattr(backend, "OUTPUT_ROOT", tmp_path)
+    monkeypatch.setattr(backend.os, "waitpid", lambda pid, options: (0, 0))
+    monkeypatch.setattr(backend.os, "kill", lambda pid, signal: None)
+
+    assert read_job()["status"] == "running"
 
 
 def test_prediction_csv_contains_prediction_target_and_error():
