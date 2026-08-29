@@ -24,19 +24,20 @@ from .Basic import timestep_embedding
 # UPT Mesh Encoder
 ################################################################
 
+
 class RansPerceiver_Encoder(nn.Module):
     def __init__(
-            self,
-            dim,
-            num_attn_heads,
-            num_output_tokens,
-            add_type_token=False,
-            init_weights="xavier_uniform",
-            init_last_proj_zero=False,
-            input_shape: tuple | None = None,
-            fun_dim=0,
-            time_input=False,
-            n_hidden=256,
+        self,
+        dim,
+        num_attn_heads,
+        num_output_tokens,
+        add_type_token=False,
+        init_weights="xavier_uniform",
+        init_last_proj_zero=False,
+        input_shape: tuple | None = None,
+        fun_dim=0,
+        time_input=False,
+        n_hidden=256,
     ):
         super().__init__()
         self.dim = dim
@@ -65,13 +66,21 @@ class RansPerceiver_Encoder(nn.Module):
             num_heads=num_attn_heads,
             num_query_tokens=num_output_tokens,
             perceiver_kwargs={
-                'init_weights': init_weights,
-                'init_last_proj_zero': init_last_proj_zero,
+                "init_weights": init_weights,
+                "init_last_proj_zero": init_last_proj_zero,
             },
         )
 
         if add_type_token:
-            self.type_token = nn.Parameter(torch.empty(size=(1, 1, dim,)))
+            self.type_token = nn.Parameter(
+                torch.empty(
+                    size=(
+                        1,
+                        1,
+                        dim,
+                    )
+                )
+            )
         else:
             self.type_token = None
 
@@ -80,8 +89,7 @@ class RansPerceiver_Encoder(nn.Module):
 
         if self.time_input:
             self.time_fc = nn.Sequential(
-                nn.Linear(n_hidden, n_hidden), nn.SiLU(),
-                nn.Linear(n_hidden, n_hidden)
+                nn.Linear(n_hidden, n_hidden), nn.SiLU(), nn.Linear(n_hidden, n_hidden)
             )
 
     def forward(self, x, fx=None, T=None):
@@ -111,18 +119,19 @@ class RansPerceiver_Encoder(nn.Module):
 # UPT Latent Transformer
 ################################################################
 
+
 class TransformerModel(nn.Module):
     def __init__(
-            self,
-            dim,
-            depth,
-            num_attn_heads,
-            drop_path_rate=0.0,
-            drop_path_decay=True,
-            init_weights="xavier_uniform",
-            init_last_proj_zero=False,
-            input_shape: tuple | None = None,
-            condition_dim=None,
+        self,
+        dim,
+        depth,
+        num_attn_heads,
+        drop_path_rate=0.0,
+        drop_path_decay=True,
+        init_weights="xavier_uniform",
+        init_last_proj_zero=False,
+        input_shape: tuple | None = None,
+        condition_dim=None,
     ):
         super().__init__()
         self.dim = dim
@@ -151,16 +160,18 @@ class TransformerModel(nn.Module):
             dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
         else:
             dpr = [drop_path_rate] * depth
-        self.blocks = nn.ModuleList([
-            block_ctor(
-                dim=dim,
-                num_heads=num_attn_heads,
-                drop_path=dpr[i],
-                init_weights=init_weights,
-                init_last_proj_zero=init_last_proj_zero,
-            )
-            for i in range(self.depth)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                block_ctor(
+                    dim=dim,
+                    num_heads=num_attn_heads,
+                    drop_path=dpr[i],
+                    init_weights=init_weights,
+                    init_last_proj_zero=init_last_proj_zero,
+                )
+                for i in range(self.depth)
+            ]
+        )
 
     def forward(self, x, condition=None, static_tokens=None):
         assert x.ndim == 3
@@ -173,7 +184,7 @@ class TransformerModel(nn.Module):
         x = self.input_proj(x)
 
         # apply blocks
-        blk_kwargs = {'cond': condition} if condition is not None else {}
+        blk_kwargs = {"cond": condition} if condition is not None else {}
         for blk in self.blocks:
             x = blk(x, **blk_kwargs)
 
@@ -189,20 +200,21 @@ class TransformerModel(nn.Module):
 # UPT Decoder
 ################################################################
 
+
 class RansPerceiver_Decoder(nn.Module):
     def __init__(
-            self,
-            dim,
-            num_attn_heads,
-            init_weights="xavier_uniform",
-            init_last_proj_zero=False,
-            use_last_norm=False,
-            input_shape: tuple | None = None,
-            ndim: int | None = None,
-            output_shape: tuple | None = None,
-            fun_dim=0,
-            time_input=False,
-            n_hidden=256,
+        self,
+        dim,
+        num_attn_heads,
+        init_weights="xavier_uniform",
+        init_last_proj_zero=False,
+        use_last_norm=False,
+        input_shape: tuple | None = None,
+        ndim: int | None = None,
+        output_shape: tuple | None = None,
+        fun_dim=0,
+        time_input=False,
+        n_hidden=256,
     ):
         super().__init__()
         self.dim = dim
@@ -222,7 +234,9 @@ class RansPerceiver_Decoder(nn.Module):
 
         # query tokens (create them from a positional embedding)
         if self.fun_dim != 0:
-            self.pos_embed = ContinuousSincosEmbed(dim=dim - self.fun_dim, ndim=self.ndim)
+            self.pos_embed = ContinuousSincosEmbed(
+                dim=dim - self.fun_dim, ndim=self.ndim
+            )
         else:
             self.pos_embed = ContinuousSincosEmbed(dim=dim, ndim=self.ndim)
         self.query_mlp = Mlp(in_dim=dim, hidden_dim=dim, init_weights=init_weights)
@@ -241,8 +255,7 @@ class RansPerceiver_Decoder(nn.Module):
 
         if self.time_input:
             self.time_fc = nn.Sequential(
-                nn.Linear(n_hidden, n_hidden), nn.SiLU(),
-                nn.Linear(n_hidden, n_hidden)
+                nn.Linear(n_hidden, n_hidden), nn.SiLU(), nn.Linear(n_hidden, n_hidden)
             )
 
     def forward(self, x, query_x, query_fx=None, T=None):
@@ -273,6 +286,7 @@ class RansPerceiver_Decoder(nn.Module):
 # UPT Main Model
 ################################################################
 
+
 class UPT(nn.Module):
     """
     Universal Physics Transformer for irregular mesh PDE solving.
@@ -285,6 +299,7 @@ class UPT(nn.Module):
     Output:
         out: [B, N, out_dim] - predicted flow
     """
+
     def __init__(
         self,
         space_dim=2,
@@ -296,12 +311,12 @@ class UPT(nn.Module):
         num_output_tokens=32,
         drop_path_rate=0.3,
         time_input=False,
-        geotype='unstructured',
+        geotype="unstructured",
         unified_pos=False,
         ref=8,
     ):
         super().__init__()
-        self.__name__ = 'UPT'
+        self.__name__ = "UPT"
         self.space_dim = space_dim
         self.fun_dim = fun_dim
         self.out_dim = out_dim
@@ -321,7 +336,7 @@ class UPT(nn.Module):
         self.mesh_encoder = RansPerceiver_Encoder(
             num_output_tokens=num_output_tokens,
             add_type_token=False,
-            init_weights='truncnormal',
+            init_weights="truncnormal",
             dim=n_hidden,
             num_attn_heads=n_heads,
             input_shape=self.input_shape,
@@ -332,19 +347,19 @@ class UPT(nn.Module):
 
         # latent
         self.latent = TransformerModel(
-            init_weights='truncnormal',
+            init_weights="truncnormal",
             drop_path_rate=drop_path_rate,
             drop_path_decay=False,
             dim=n_hidden,
             num_attn_heads=n_heads,
             depth=n_layers,
             input_shape=self.mesh_encoder.output_shape,
-            condition_dim=None
+            condition_dim=None,
         )
 
         # decoder
         self.decoder = RansPerceiver_Decoder(
-            init_weights='truncnormal',
+            init_weights="truncnormal",
             dim=n_hidden,
             num_attn_heads=n_heads,
             input_shape=self.latent.output_shape,
@@ -388,13 +403,13 @@ class UPT(nn.Module):
 class UPTLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.mse = nn.MSELoss(reduction='none')
+        self.mse = nn.MSELoss(reduction="none")
 
     def forward(self, pred, target):
         return self.mse(pred, target).mean()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     B, N = 2, 1000
 
     model = UPT(

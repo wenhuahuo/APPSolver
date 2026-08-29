@@ -123,9 +123,7 @@ class PointTokenOperator(nn.Module):
         return_diagnostics: bool = False,
     ):
         if num_tokens < 2 or num_tokens > self.max_tokens:
-            raise ValueError(
-                f"num_tokens={num_tokens} outside [2, {self.max_tokens}]"
-            )
+            raise ValueError(f"num_tokens={num_tokens} outside [2, {self.max_tokens}]")
         features = self.point_encoder(torch.cat([positions, flow], dim=-1))
 
         assignment = None
@@ -159,9 +157,9 @@ class PointTokenOperator(nn.Module):
         else:
             assert assignment is not None
             context = torch.einsum("bnp,bpd->bnd", assignment, encoded)
-            entropy = -(
-                assignment.clamp_min(1e-12).log() * assignment
-            ).sum(dim=-1).mean() / math.log(num_tokens)
+            entropy = -(assignment.clamp_min(1e-12).log() * assignment).sum(
+                dim=-1
+            ).mean() / math.log(num_tokens)
             confidence = assignment.max(dim=-1).values.mean()
 
         point_position = self.position_encoder(positions)

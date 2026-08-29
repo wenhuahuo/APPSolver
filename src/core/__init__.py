@@ -16,16 +16,16 @@ from .trainer import (
 )
 
 __all__ = [
-    'set_seed',
-    'get_device',
-    'build_optimizer',
-    'build_scheduler',
-    'compute_metrics',
-    'MetricsCalculator',
-    'patches_to_points',
-    'recover_points_knn',
-    'save_checkpoint',
-    'load_checkpoint',
-    'IrregularTrainer',
-    'PatchTrainer',
+    "set_seed",
+    "get_device",
+    "build_optimizer",
+    "build_scheduler",
+    "compute_metrics",
+    "MetricsCalculator",
+    "patches_to_points",
+    "recover_points_knn",
+    "save_checkpoint",
+    "load_checkpoint",
+    "IrregularTrainer",
+    "PatchTrainer",
 ]

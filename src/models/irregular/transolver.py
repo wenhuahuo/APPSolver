@@ -18,12 +18,12 @@ from .Basic import MLP
 
 
 class PhysicsAttentionIrregularMesh(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0., slice_num=64):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, slice_num=64):
         super().__init__()
         inner_dim = dim_head * heads
         self.dim_head = dim_head
         self.heads = heads
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head**-0.5
         self.softmax = nn.Softmax(dim=-1)
         self.dropout = nn.Dropout(dropout)
         self.temperature = nn.Parameter(torch.ones([1, heads, 1, 1]) * 0.5)
@@ -36,22 +36,29 @@ class PhysicsAttentionIrregularMesh(nn.Module):
         self.to_q = nn.Linear(dim_head, dim_head, bias=False)
         self.to_k = nn.Linear(dim_head, dim_head, bias=False)
         self.to_v = nn.Linear(dim_head, dim_head, bias=False)
-        self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, dim),
-            nn.Dropout(dropout)
-        )
+        self.to_out = nn.Sequential(nn.Linear(inner_dim, dim), nn.Dropout(dropout))
 
     def forward(self, x):
         B, N, C = x.shape
 
-        fx_mid = self.in_project_fx(x).reshape(B, N, self.heads, self.dim_head) \
-            .permute(0, 2, 1, 3).contiguous()
-        x_mid = self.in_project_x(x).reshape(B, N, self.heads, self.dim_head) \
-            .permute(0, 2, 1, 3).contiguous()
+        fx_mid = (
+            self.in_project_fx(x)
+            .reshape(B, N, self.heads, self.dim_head)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )
+        x_mid = (
+            self.in_project_x(x)
+            .reshape(B, N, self.heads, self.dim_head)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )
         slice_weights = self.softmax(self.in_project_slice(x_mid) / self.temperature)
         slice_norm = slice_weights.sum(2)
         slice_token = torch.einsum("bhnc,bhng->bhgc", fx_mid, slice_weights)
-        slice_token = slice_token / ((slice_norm + 1e-5)[:, :, :, None].repeat(1, 1, 1, self.dim_head))
+        slice_token = slice_token / (
+            (slice_norm + 1e-5)[:, :, :, None].repeat(1, 1, 1, self.dim_head)
+        )
 
         q_slice_token = self.to_q(slice_token)
         k_slice_token = self.to_k(slice_token)
@@ -62,31 +69,41 @@ class PhysicsAttentionIrregularMesh(nn.Module):
         out_slice_token = torch.matmul(attn, v_slice_token)
 
         out_x = torch.einsum("bhgc,bhng->bhnc", out_slice_token, slice_weights)
-        out_x = rearrange(out_x, 'b h n d -> b n (h d)')
+        out_x = rearrange(out_x, "b h n d -> b n (h d)")
         return self.to_out(out_x)
 
 
 class TransolverBlock(nn.Module):
     def __init__(
-            self,
-            num_heads: int,
-            hidden_dim: int,
-            dropout: float,
-            act='gelu',
-            mlp_ratio=4,
-            last_layer=False,
-            out_dim=1,
-            slice_num=32,
+        self,
+        num_heads: int,
+        hidden_dim: int,
+        dropout: float,
+        act="gelu",
+        mlp_ratio=4,
+        last_layer=False,
+        out_dim=1,
+        slice_num=32,
     ):
         super().__init__()
         self.last_layer = last_layer
         self.ln_1 = nn.LayerNorm(hidden_dim)
         self.Attn = PhysicsAttentionIrregularMesh(
-            hidden_dim, heads=num_heads, dim_head=hidden_dim // num_heads,
-            dropout=dropout, slice_num=slice_num
+            hidden_dim,
+            heads=num_heads,
+            dim_head=hidden_dim // num_heads,
+            dropout=dropout,
+            slice_num=slice_num,
         )
         self.ln_2 = nn.LayerNorm(hidden_dim)
-        self.mlp = MLP(hidden_dim, hidden_dim * mlp_ratio, hidden_dim, n_layers=0, res=False, act=act)
+        self.mlp = MLP(
+            hidden_dim,
+            hidden_dim * mlp_ratio,
+            hidden_dim,
+            n_layers=0,
+            res=False,
+            act=act,
+        )
         if self.last_layer:
             self.ln_3 = nn.LayerNorm(hidden_dim)
             self.mlp2 = nn.Linear(hidden_dim, out_dim)
@@ -108,13 +125,13 @@ class Transolver(nn.Module):
         n_hidden=256,
         dropout=0.0,
         n_head=8,
-        act='gelu',
+        act="gelu",
         mlp_ratio=1,
         fun_dim=4,
         out_dim=4,
         slice_num=32,
         ref=8,
-        unified_pos=False
+        unified_pos=False,
     ):
         super().__init__()
         self.ref = ref
@@ -123,25 +140,44 @@ class Transolver(nn.Module):
         self.space_dim = space_dim
 
         if self.unified_pos:
-            self.preprocess = MLP(fun_dim + self.ref * self.ref, n_hidden * 2, n_hidden, n_layers=0, res=False, act=act)
-        else:
-            self.preprocess = MLP(fun_dim + space_dim, n_hidden * 2, n_hidden, n_layers=0, res=False, act=act)
-
-        self.blocks = nn.ModuleList([
-            TransolverBlock(
-                num_heads=n_head, hidden_dim=n_hidden,
-                dropout=dropout,
+            self.preprocess = MLP(
+                fun_dim + self.ref * self.ref,
+                n_hidden * 2,
+                n_hidden,
+                n_layers=0,
+                res=False,
                 act=act,
-                mlp_ratio=mlp_ratio,
-                out_dim=out_dim,
-                slice_num=slice_num,
-                last_layer=(_ == n_layers - 1)
             )
-            for _ in range(n_layers)
-        ])
+        else:
+            self.preprocess = MLP(
+                fun_dim + space_dim,
+                n_hidden * 2,
+                n_hidden,
+                n_layers=0,
+                res=False,
+                act=act,
+            )
+
+        self.blocks = nn.ModuleList(
+            [
+                TransolverBlock(
+                    num_heads=n_head,
+                    hidden_dim=n_hidden,
+                    dropout=dropout,
+                    act=act,
+                    mlp_ratio=mlp_ratio,
+                    out_dim=out_dim,
+                    slice_num=slice_num,
+                    last_layer=(_ == n_layers - 1),
+                )
+                for _ in range(n_layers)
+            ]
+        )
 
         self._initialize_weights()
-        self.placeholder = nn.Parameter((1 / n_hidden) * torch.rand(n_hidden, dtype=torch.float))
+        self.placeholder = nn.Parameter(
+            (1 / n_hidden) * torch.rand(n_hidden, dtype=torch.float)
+        )
 
     def _initialize_weights(self):
         def _init_weights(m):
@@ -160,9 +196,13 @@ class Transolver(nn.Module):
         gridx = gridx.reshape(1, self.ref, 1, 1).repeat([batchsize, 1, self.ref, 1])
         gridy = torch.linspace(0, 1, self.ref, dtype=torch.float, device=x.device)
         gridy = gridy.reshape(1, 1, self.ref, 1).repeat([batchsize, self.ref, 1, 1])
-        grid_ref = torch.cat((gridx, gridy), dim=-1).reshape(batchsize, self.ref * self.ref, 2)
+        grid_ref = torch.cat((gridx, gridy), dim=-1).reshape(
+            batchsize, self.ref * self.ref, 2
+        )
 
-        pos = torch.sqrt(torch.sum((x[:, :, None, :] - grid_ref[:, None, :, :]) ** 2, dim=-1))
+        pos = torch.sqrt(
+            torch.sum((x[:, :, None, :] - grid_ref[:, None, :, :]) ** 2, dim=-1)
+        )
         pos = pos.reshape(batchsize, x.shape[1], self.ref * self.ref).contiguous()
         return pos
 
@@ -187,13 +227,13 @@ class Transolver(nn.Module):
 class TransolverLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.mse = nn.MSELoss(reduction='none')
+        self.mse = nn.MSELoss(reduction="none")
 
     def forward(self, pred, target):
         return self.mse(pred, target).mean()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     B, N, C = 2, 1000, 6
 
     model = Transolver(
@@ -202,13 +242,13 @@ if __name__ == '__main__':
         n_hidden=256,
         dropout=0.0,
         n_head=8,
-        act='gelu',
+        act="gelu",
         mlp_ratio=1,
         fun_dim=4,
         out_dim=4,
         slice_num=32,
         ref=8,
-        unified_pos=False
+        unified_pos=False,
     )
 
     pos = torch.randn(B, N, 2)

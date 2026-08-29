@@ -12,8 +12,6 @@ to the sequence.
 Output shape: [B, P, N*C_out] - predicted flow at next timestep
 """
 
-
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,7 +22,7 @@ from .condition_encoders import build_condition_encoder
 class Transformer(nn.Module):
     """
     Unified Transformer for patch-based flow field prediction.
-    
+
     Supports optional parameter embedding:
     - Without embedding: [B, P, in_flattened_dim] -> [B, P, out_flattened_dim]
     - With embedding: [B, P, in_flattened_dim] + [B, params_dim]
@@ -43,7 +41,7 @@ class Transformer(nn.Module):
         dropout: float = 0.1,
         max_patches: int = 10000,
         params_dim: int | None = None,
-        condition_encoder: str = 'token',
+        condition_encoder: str = "token",
     ):
         super().__init__()
 
@@ -60,9 +58,10 @@ class Transformer(nn.Module):
         self.params_proj = None
         self.condition_module = None
         if params_dim is not None:
-            if condition_encoder == 'token':
+            if condition_encoder == "token":
                 self.params_proj = (
-                    nn.Identity() if params_dim == d_model
+                    nn.Identity()
+                    if params_dim == d_model
                     else nn.Linear(params_dim, d_model)
                 )
             else:
@@ -89,7 +88,7 @@ class Transformer(nn.Module):
     def _init_weights(self):
         # pos_embed keeps its trunc_normal_ initialization from __init__.
         for name, p in self.named_parameters():
-            if name == 'pos_embed':
+            if name == "pos_embed":
                 continue
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
@@ -103,7 +102,7 @@ class Transformer(nn.Module):
         Args:
             x: (B, P, in_flattened_dim) - input patch features
             params_embed: (B, params_dim) or None - optional pre-computed LLM embedding
-        
+
         Returns:
             (B, P, out_flattened_dim) - predicted flow features
         """
@@ -117,7 +116,7 @@ class Transformer(nn.Module):
             pos = F.interpolate(
                 self.pos_embed.permute(0, 2, 1),
                 size=P,
-                mode='linear',
+                mode="linear",
                 align_corners=False,
             ).permute(0, 2, 1)
 
@@ -134,12 +133,12 @@ class Transformer(nn.Module):
                     f"configured params_dim {self.params_dim}."
                 )
 
-            if self.condition_encoder_type == 'film':
+            if self.condition_encoder_type == "film":
                 assert self.condition_module is not None
                 gamma, beta = self.condition_module(params_embed)
                 x_proj = x_proj * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
             else:
-                if self.condition_encoder_type == 'token':
+                if self.condition_encoder_type == "token":
                     assert self.params_proj is not None
                     condition_token = self.params_proj(params_embed)
                 else:
@@ -171,7 +170,7 @@ class LearnedSliceAttention(nn.Module):
         super().__init__()
         self.nhead = nhead
         self.head_dim = d_model // nhead
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         self.temperature = nn.Parameter(torch.full((1, nhead, 1, 1), 0.5))
         self.feature_proj = nn.Linear(d_model, d_model)
         self.assignment_proj = nn.Linear(d_model, d_model)
@@ -184,18 +183,22 @@ class LearnedSliceAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, patch_count, width = x.shape
-        features = self.feature_proj(x).reshape(
-            batch_size, patch_count, self.nhead, self.head_dim
-        ).permute(0, 2, 1, 3)
-        assignment_features = self.assignment_proj(x).reshape(
-            batch_size, patch_count, self.nhead, self.head_dim
-        ).permute(0, 2, 1, 3)
+        features = (
+            self.feature_proj(x)
+            .reshape(batch_size, patch_count, self.nhead, self.head_dim)
+            .permute(0, 2, 1, 3)
+        )
+        assignment_features = (
+            self.assignment_proj(x)
+            .reshape(batch_size, patch_count, self.nhead, self.head_dim)
+            .permute(0, 2, 1, 3)
+        )
         assignment = torch.softmax(
             self.slice_proj(assignment_features) / self.temperature,
             dim=-1,
         )
         mass = assignment.sum(dim=2)
-        slices = torch.einsum('bhpd,bhps->bhsd', features, assignment)
+        slices = torch.einsum("bhpd,bhps->bhsd", features, assignment)
         slices = slices / mass.clamp_min(1e-5).unsqueeze(-1)
 
         attention = torch.softmax(
@@ -204,10 +207,8 @@ class LearnedSliceAttention(nn.Module):
             dim=-1,
         )
         slices = torch.matmul(self.dropout(attention), self.to_v(slices))
-        output = torch.einsum('bhsd,bhps->bhpd', slices, assignment)
-        output = output.permute(0, 2, 1, 3).reshape(
-            batch_size, patch_count, width
-        )
+        output = torch.einsum("bhsd,bhps->bhpd", slices, assignment)
+        output = output.permute(0, 2, 1, 3).reshape(batch_size, patch_count, width)
         return self.out_proj(output)
 
 
@@ -258,7 +259,7 @@ class LearnedPatchTransformer(Transformer):
         dropout: float = 0.1,
         max_patches: int = 10000,
         params_dim: int | None = None,
-        condition_encoder: str = 'token',
+        condition_encoder: str = "token",
         slice_num: int = 32,
     ):
         super().__init__(
@@ -274,16 +275,18 @@ class LearnedPatchTransformer(Transformer):
             condition_encoder=condition_encoder,
         )
         self.slice_num = slice_num
-        self.transformer = nn.Sequential(*[
-            LearnedPatchBlock(
-                d_model=d_model,
-                nhead=nhead,
-                dim_feedforward=dim_feedforward,
-                dropout=dropout,
-                slice_num=slice_num,
-            )
-            for _ in range(num_layers)
-        ])
+        self.transformer = nn.Sequential(
+            *[
+                LearnedPatchBlock(
+                    d_model=d_model,
+                    nhead=nhead,
+                    dim_feedforward=dim_feedforward,
+                    dropout=dropout,
+                    slice_num=slice_num,
+                )
+                for _ in range(num_layers)
+            ]
+        )
         self._init_weights()
 
 
@@ -293,9 +296,11 @@ class TransformerLoss(nn.Module):
     def __init__(self, use_mask: bool = True):
         super().__init__()
         self.use_mask = use_mask
-        self.mse = nn.MSELoss(reduction='none')
+        self.mse = nn.MSELoss(reduction="none")
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         loss = self.mse(pred, target)
 
         if self.use_mask and mask is not None:

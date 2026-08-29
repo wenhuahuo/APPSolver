@@ -8,7 +8,6 @@ Paper: GNOT: A General Neural Operator Transformer for Operator Learning (ICML 2
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.layers import trunc_normal_
 
 from .Basic import ACTIVATION, MLP, LinearAttention, timestep_embedding
 
@@ -16,8 +15,16 @@ from .Basic import ACTIVATION, MLP, LinearAttention, timestep_embedding
 class GNOT_block(nn.Module):
     """Transformer encoder block in MOE style."""
 
-    def __init__(self, num_heads: int, hidden_dim: int, dropout: float,
-                 act='gelu', mlp_ratio=4, space_dim=2, n_experts=3):
+    def __init__(
+        self,
+        num_heads: int,
+        hidden_dim: int,
+        dropout: float,
+        act="gelu",
+        mlp_ratio=4,
+        space_dim=2,
+        n_experts=3,
+    ):
         super().__init__()
         self.ln1 = nn.LayerNorm(hidden_dim)
         self.ln2 = nn.LayerNorm(hidden_dim)
@@ -26,10 +33,16 @@ class GNOT_block(nn.Module):
         self.ln5 = nn.LayerNorm(hidden_dim)
 
         self.selfattn = LinearAttention(
-            hidden_dim, heads=num_heads, dim_head=hidden_dim // num_heads, dropout=dropout
+            hidden_dim,
+            heads=num_heads,
+            dim_head=hidden_dim // num_heads,
+            dropout=dropout,
         )
         self.crossattn = LinearAttention(
-            hidden_dim, heads=num_heads, dim_head=hidden_dim // num_heads, dropout=dropout
+            hidden_dim,
+            heads=num_heads,
+            dim_head=hidden_dim // num_heads,
+            dropout=dropout,
         )
         self.resid_drop1 = nn.Dropout(dropout)
         self.resid_drop2 = nn.Dropout(dropout)
@@ -40,24 +53,34 @@ class GNOT_block(nn.Module):
             self.act = ACTIVATION[act]
         else:
             raise NotImplementedError(f"Activation {act} not supported")
-        self.moe_mlp1 = nn.ModuleList([nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * mlp_ratio),
-            self.act(),
-            nn.Linear(hidden_dim * mlp_ratio, hidden_dim),
-        ) for _ in range(self.n_experts)])
+        self.moe_mlp1 = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim * mlp_ratio),
+                    self.act(),
+                    nn.Linear(hidden_dim * mlp_ratio, hidden_dim),
+                )
+                for _ in range(self.n_experts)
+            ]
+        )
 
-        self.moe_mlp2 = nn.ModuleList([nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * mlp_ratio),
-            self.act(),
-            nn.Linear(hidden_dim * mlp_ratio, hidden_dim),
-        ) for _ in range(self.n_experts)])
+        self.moe_mlp2 = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim * mlp_ratio),
+                    self.act(),
+                    nn.Linear(hidden_dim * mlp_ratio, hidden_dim),
+                )
+                for _ in range(self.n_experts)
+            ]
+        )
 
         self.gatenet = nn.Sequential(
             nn.Linear(space_dim, hidden_dim * mlp_ratio),
             self.act(),
             nn.Linear(hidden_dim * mlp_ratio, hidden_dim * mlp_ratio),
             self.act(),
-            nn.Linear(hidden_dim * mlp_ratio, self.n_experts)
+            nn.Linear(hidden_dim * mlp_ratio, self.n_experts),
         )
 
     def forward(self, x, y, pos):
@@ -66,13 +89,17 @@ class GNOT_block(nn.Module):
         ## cross attention between geo and physics observation
         x = x + self.resid_drop1(self.crossattn(self.ln1(x), self.ln2(y)))
         ## moe mlp
-        x_moe1 = torch.stack([self.moe_mlp1[i](x) for i in range(self.n_experts)], dim=-1)
+        x_moe1 = torch.stack(
+            [self.moe_mlp1[i](x) for i in range(self.n_experts)], dim=-1
+        )
         x_moe1 = (gate_score * x_moe1).sum(dim=-1, keepdim=False)
         x = x + self.ln3(x_moe1)
         ## self attention among geo
         x = x + self.resid_drop2(self.selfattn(self.ln4(x)))
         ## moe mlp
-        x_moe2 = torch.stack([self.moe_mlp2[i](x) for i in range(self.n_experts)], dim=-1)
+        x_moe2 = torch.stack(
+            [self.moe_mlp2[i](x) for i in range(self.n_experts)], dim=-1
+        )
         x_moe2 = (gate_score * x_moe2).sum(dim=-1, keepdim=False)
         x = x + self.ln5(x_moe2)
         return x
@@ -90,6 +117,7 @@ class GNOT(nn.Module):
     Output:
         out: [B, N, out_dim] - predicted flow
     """
+
     def __init__(
         self,
         space_dim=2,
@@ -100,14 +128,14 @@ class GNOT(nn.Module):
         n_layers=3,
         mlp_ratio=4,
         dropout=0.0,
-        act='gelu',
+        act="gelu",
         n_experts=3,
         time_input=False,
         unified_pos=False,
         ref=8,
     ):
         super().__init__()
-        self.__name__ = 'GNOT'
+        self.__name__ = "GNOT"
         self.space_dim = space_dim
         self.fun_dim = fun_dim
         self.out_dim = out_dim
@@ -124,34 +152,35 @@ class GNOT(nn.Module):
 
         ## embedding
         self.preprocess_x = MLP(
-            space_dim, n_hidden * 2, n_hidden,
-            n_layers=0, res=False, act=act
+            space_dim, n_hidden * 2, n_hidden, n_layers=0, res=False, act=act
         )
         self.preprocess_z = MLP(
-            fun_dim + space_dim, n_hidden * 2, n_hidden,
-            n_layers=0, res=False, act=act
+            fun_dim + space_dim, n_hidden * 2, n_hidden, n_layers=0, res=False, act=act
         )
 
         if time_input:
             self.time_fc = nn.Sequential(
-                nn.Linear(n_hidden, n_hidden), nn.SiLU(),
-                nn.Linear(n_hidden, n_hidden)
+                nn.Linear(n_hidden, n_hidden), nn.SiLU(), nn.Linear(n_hidden, n_hidden)
             )
 
         ## models
-        self.blocks = nn.ModuleList([
-            GNOT_block(
-                num_heads=n_heads,
-                hidden_dim=n_hidden,
-                dropout=dropout,
-                act=act,
-                mlp_ratio=mlp_ratio,
-                space_dim=space_dim,
-                n_experts=n_experts
-            )
-            for _ in range(n_layers)
-        ])
-        self.placeholder = nn.Parameter((1 / n_hidden) * torch.rand(n_hidden, dtype=torch.float))
+        self.blocks = nn.ModuleList(
+            [
+                GNOT_block(
+                    num_heads=n_heads,
+                    hidden_dim=n_hidden,
+                    dropout=dropout,
+                    act=act,
+                    mlp_ratio=mlp_ratio,
+                    space_dim=space_dim,
+                    n_experts=n_experts,
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.placeholder = nn.Parameter(
+            (1 / n_hidden) * torch.rand(n_hidden, dtype=torch.float)
+        )
 
         # projectors
         self.fc1 = nn.Linear(n_hidden, n_hidden * 2)
@@ -162,7 +191,7 @@ class GNOT(nn.Module):
     def _initialize_weights(self):
         def _init_weights(m):
             if isinstance(m, nn.Linear):
-                trunc_normal_(m.weight, std=0.02)
+                nn.init.trunc_normal_(m.weight, std=0.02)
                 if isinstance(m, nn.Linear) and m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d)):
@@ -217,13 +246,13 @@ class GNOT(nn.Module):
 class GNOTLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.mse = nn.MSELoss(reduction='none')
+        self.mse = nn.MSELoss(reduction="none")
 
     def forward(self, pred, target):
         return self.mse(pred, target).mean()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     B, N = 2, 1000
 
     model = GNOT(

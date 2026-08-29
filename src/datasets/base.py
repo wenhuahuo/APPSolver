@@ -74,7 +74,7 @@ class TemporalPairMixin(Dataset):
 
     def _split_data(self) -> None:
         """Build the temporal split once and expose the requested pair subset."""
-        if not hasattr(self, '_all_coords'):
+        if not hasattr(self, "_all_coords"):
             self._all_coords = self.coords
             self._all_flows = self.flows
             self._original_n_timesteps = len(self._all_coords)
@@ -86,11 +86,11 @@ class TemporalPairMixin(Dataset):
                 self.rollout_holdout_steps,
             )
 
-        if self.split == 'train':
+        if self.split == "train":
             self.pair_indices = self.temporal_split.train
-        elif self.split == 'test':
+        elif self.split == "test":
             self.pair_indices = self.temporal_split.test
-        elif self.split == 'all':
+        elif self.split == "all":
             # Inference/demo-only view over every pair, including the rollout
             # window; statistics must never be derived from it.
             if self.normalize and self._normalization_params is None:
@@ -115,7 +115,7 @@ class TemporalPairMixin(Dataset):
         self.split = split
         self._split_data()
 
-    def clone_for_split(self, split: str) -> 'TemporalPairMixin':
+    def clone_for_split(self, split: str) -> "TemporalPairMixin":
         """Return a shallow copy that exposes a different pair subset."""
         dataset = copy.copy(self)
         dataset.set_split(split)
@@ -135,10 +135,10 @@ class TemporalPairMixin(Dataset):
         params = self._normalization_params
         if params is None:
             params = compute_global_normalization_params([self])
-        self.coord_mean = params['coord_mean']
-        self.coord_std = params['coord_std']
-        self.flow_mean = params['flow_mean']
-        self.flow_std = params['flow_std']
+        self.coord_mean = params["coord_mean"]
+        self.coord_std = params["coord_std"]
+        self.flow_mean = params["flow_mean"]
+        self.flow_std = params["flow_std"]
 
     def _normalize_coords(self, coords: np.ndarray) -> np.ndarray:
         if not self.normalize:
@@ -159,18 +159,18 @@ class TemporalPairMixin(Dataset):
         """Return a copy of the current Z-score statistics (None if disabled)."""
         if not self.normalize:
             return {
-                'coord_mean': None,
-                'coord_std': None,
-                'flow_mean': None,
-                'flow_std': None,
+                "coord_mean": None,
+                "coord_std": None,
+                "flow_mean": None,
+                "flow_std": None,
             }
         assert self.coord_mean is not None and self.coord_std is not None
         assert self.flow_mean is not None and self.flow_std is not None
         return {
-            'coord_mean': np.asarray(self.coord_mean, dtype=np.float32).copy(),
-            'coord_std': np.asarray(self.coord_std, dtype=np.float32).copy(),
-            'flow_mean': np.asarray(self.flow_mean, dtype=np.float32).copy(),
-            'flow_std': np.asarray(self.flow_std, dtype=np.float32).copy(),
+            "coord_mean": np.asarray(self.coord_mean, dtype=np.float32).copy(),
+            "coord_std": np.asarray(self.coord_std, dtype=np.float32).copy(),
+            "flow_mean": np.asarray(self.flow_mean, dtype=np.float32).copy(),
+            "flow_std": np.asarray(self.flow_std, dtype=np.float32).copy(),
         }
 
     def get_rollout_sequence(self) -> tuple[np.ndarray, np.ndarray]:
@@ -182,9 +182,7 @@ class TemporalPairMixin(Dataset):
 class IrregularPairDataset(TemporalPairMixin):
     """An irregular point-cloud dataset returning ``(pos, fx, y)`` pairs."""
 
-    def __getitem__(
-        self, idx: int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         time_idx = int(self.pair_indices[idx])
         coords_t = self._all_coords[time_idx]
         flow_t = self._all_flows[time_idx]
@@ -200,7 +198,7 @@ class IrregularPairDataset(TemporalPairMixin):
 class PatchPairDataset(TemporalPairMixin):
     """A patch-tokenized dataset with a global k-NN full-point recovery map."""
 
-    quadtree: 'QuadTreeMesh'
+    quadtree: "QuadTreeMesh"
     num_patches: int
     max_points: int
     include_coordinates: bool
@@ -234,9 +232,7 @@ class PatchPairDataset(TemporalPairMixin):
         self._patch_indices = np.zeros(
             (self.num_patches, self.max_points), dtype=np.int64
         )
-        self._patch_mask = np.zeros(
-            (self.num_patches, self.max_points), dtype=bool
-        )
+        self._patch_mask = np.zeros((self.num_patches, self.max_points), dtype=bool)
         for patch_idx, patch in enumerate(self.quadtree.patches):
             n_points = len(patch.points)
             self._patch_indices[patch_idx, :n_points] = patch.points
@@ -246,7 +242,8 @@ class PatchPairDataset(TemporalPairMixin):
     def _extract_patches(self, coords: np.ndarray, flows: np.ndarray) -> torch.Tensor:
         values = (
             np.concatenate([coords, flows], axis=1)
-            if self.include_coordinates else flows
+            if self.include_coordinates
+            else flows
         )
         patches = values[self._patch_indices]
         patches[~self._patch_mask] = 0.0
@@ -260,7 +257,7 @@ class PatchPairDataset(TemporalPairMixin):
     def _create_mask(self) -> torch.Tensor:
         return self._mask_tensor
 
-    def get_quadtree(self) -> 'QuadTreeMesh':
+    def get_quadtree(self) -> "QuadTreeMesh":
         """Return the quadtree partition built on the first frame."""
         return self.quadtree
 
@@ -293,8 +290,7 @@ class MultiConditionDatasetMixin(Dataset):
         """Return a shallow copy of ``source`` exposing a different split."""
         dataset = copy.copy(source)
         dataset.sub_datasets = [
-            sub_dataset.clone_for_split(split)
-            for sub_dataset in source.sub_datasets
+            sub_dataset.clone_for_split(split) for sub_dataset in source.sub_datasets
         ]
         dataset._build_index_map()
         return dataset
@@ -315,8 +311,8 @@ class MultiConditionIrregularDatasetMixin(MultiConditionDatasetMixin):
 
     def get_global_shape(self) -> dict[str, int]:
         return {
-            'n_channels': self.n_channels,
-            'max_points': self.global_max_points,
+            "n_channels": self.n_channels,
+            "max_points": self.global_max_points,
         }
 
 
@@ -333,62 +329,63 @@ class MultiConditionPatchDatasetMixin(MultiConditionDatasetMixin):
         cond_id, local_idx = self._index_map[idx]
         sample: dict[str, torch.Tensor] = self.sub_datasets[cond_id][local_idx]
 
-        orig_input = sample['input']
-        orig_output = sample['output']
-        orig_mask = sample['mask']
+        orig_input = sample["input"]
+        orig_output = sample["output"]
+        orig_mask = sample["mask"]
 
         input_padded = torch.zeros(
             (self.global_max_patches, self.global_max_points * self.input_dim),
-            dtype=torch.float32
+            dtype=torch.float32,
         )
         output_padded = torch.zeros(
             (self.global_max_patches, self.global_max_points * self.output_dim),
-            dtype=torch.float32
+            dtype=torch.float32,
         )
         mask_padded = torch.zeros(
-            (self.global_max_patches, self.global_max_points),
-            dtype=torch.bool
+            (self.global_max_patches, self.global_max_points), dtype=torch.bool
         )
         p = orig_input.shape[0]
         n = orig_mask.shape[1]
         p_use = min(p, self.global_max_patches)
         n_use = min(n, self.global_max_points)
 
-        input_padded[:p_use, :n_use * self.input_dim] = orig_input[:p_use, :n_use * self.input_dim]
-        output_padded[:p_use, :n_use * self.output_dim] = orig_output[:p_use, :n_use * self.output_dim]
+        input_padded[:p_use, : n_use * self.input_dim] = orig_input[
+            :p_use, : n_use * self.input_dim
+        ]
+        output_padded[:p_use, : n_use * self.output_dim] = orig_output[
+            :p_use, : n_use * self.output_dim
+        ]
         mask_padded[:p_use, :n_use] = orig_mask[:p_use, :n_use]
         result: dict[str, torch.Tensor] = {
-            'input': input_padded,
-            'output': output_padded,
-            'mask': mask_padded,
-            'condition_id': torch.tensor(cond_id, dtype=torch.long),
-            'time_index': sample['time_index'],
+            "input": input_padded,
+            "output": output_padded,
+            "mask": mask_padded,
+            "condition_id": torch.tensor(cond_id, dtype=torch.long),
+            "time_index": sample["time_index"],
         }
-        if 'full_target' in sample:
+        if "full_target" in sample:
             full_target_padded = torch.zeros(
                 (self.global_max_full_points, self.output_dim), dtype=torch.float32
             )
-            full_point_mask = torch.zeros(
-                self.global_max_full_points, dtype=torch.bool
-            )
-            n_full = min(sample['full_target'].shape[0], self.global_max_full_points)
-            full_target_padded[:n_full] = sample['full_target'][:n_full]
+            full_point_mask = torch.zeros(self.global_max_full_points, dtype=torch.bool)
+            n_full = min(sample["full_target"].shape[0], self.global_max_full_points)
+            full_target_padded[:n_full] = sample["full_target"][:n_full]
             full_point_mask[:n_full] = True
-            result['full_target'] = full_target_padded
-            result['full_point_mask'] = full_point_mask
+            result["full_target"] = full_target_padded
+            result["full_point_mask"] = full_point_mask
 
-        if 'params_embedding' in sample:
-            result['params_embedding'] = sample['params_embedding']
-        if 'params_text' in sample:
-            result['params_text'] = sample['params_text']
+        if "params_embedding" in sample:
+            result["params_embedding"] = sample["params_embedding"]
+        if "params_text" in sample:
+            result["params_text"] = sample["params_text"]
 
         return result
 
     def get_global_shape(self) -> dict[str, int]:
         return {
-            'input_dim': self.input_dim,
-            'output_dim': self.output_dim,
-            'num_patches': self.global_max_patches,
-            'max_points': self.global_max_points,
-            'full_points': self.global_max_full_points,
+            "input_dim": self.input_dim,
+            "output_dim": self.output_dim,
+            "num_patches": self.global_max_patches,
+            "max_points": self.global_max_points,
+            "full_points": self.global_max_full_points,
         }

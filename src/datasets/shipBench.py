@@ -34,16 +34,16 @@ from .temporal import (
     stable_condition_seed,
 )
 
-_TIMESTEP_RE = re.compile(r'^timestep_(\d+)\.csv$')
+_TIMESTEP_RE = re.compile(r"^timestep_(\d+)\.csv$")
 
-DEFAULT_SHIP_CHANNELS = ['U:0', 'U:1', 'U:2', 'p_rgh']
-SHIP_COORD_CHANNELS = ['Center:0', 'Center:1', 'Center:2']
+DEFAULT_SHIP_CHANNELS = ["U:0", "U:1", "U:2", "p_rgh"]
+SHIP_COORD_CHANNELS = ["Center:0", "Center:1", "Center:2"]
 
 
 def _timestep_sort_key(path: str) -> int:
     match = _TIMESTEP_RE.match(os.path.basename(path))
     if match is None:
-        raise ValueError(f'Unexpected timestep filename: {path}')
+        raise ValueError(f"Unexpected timestep filename: {path}")
     return int(match.group(1))
 
 
@@ -79,26 +79,26 @@ def _load_npz_cache(cache_path: str) -> tuple[np.ndarray, np.ndarray, list[str]]
         return None
 
     data = np.load(cache_path, allow_pickle=False)
-    if 'coords' not in data or 'flows' not in data or 'channels' not in data:
-        raise ValueError(f'Incomplete ShipBench cache: {cache_path}')
-    if 'frame_indices' not in data:
+    if "coords" not in data or "flows" not in data or "channels" not in data:
+        raise ValueError(f"Incomplete ShipBench cache: {cache_path}")
+    if "frame_indices" not in data:
         raise ValueError(
-            f'Legacy ShipBench cache without numeric frame indices: {cache_path}; '
-            'rebuild it with scripts/rebuild_ship_flow_cache.py'
+            f"Legacy ShipBench cache without numeric frame indices: {cache_path}; "
+            "rebuild it with scripts/rebuild_ship_flow_cache.py"
         )
 
-    coords = data['coords'].astype(np.float32, copy=False)
-    flows = data['flows'].astype(np.float32, copy=False)
-    frame_indices = data['frame_indices']
+    coords = data["coords"].astype(np.float32, copy=False)
+    flows = data["flows"].astype(np.float32, copy=False)
+    frame_indices = data["frame_indices"]
     if not np.array_equal(frame_indices, np.arange(len(frame_indices))):
-        raise ValueError(f'Non-contiguous ShipBench cache time order: {cache_path}')
+        raise ValueError(f"Non-contiguous ShipBench cache time order: {cache_path}")
     if not np.array_equal(coords[0], coords[-1]):
-        raise ValueError(f'ShipBench cache coordinates are not fixed: {cache_path}')
-    channels = [str(c) for c in data['channels'].tolist()]
+        raise ValueError(f"ShipBench cache coordinates are not fixed: {cache_path}")
+    channels = [str(c) for c in data["channels"].tolist()]
     return coords, flows, channels
 
 
-def yaml_to_text(yaml_data: dict, parent_key: str = '') -> str:
+def yaml_to_text(yaml_data: dict, parent_key: str = "") -> str:
     """
     Convert YAML dictionary to natural language text description for LLM.
 
@@ -112,26 +112,44 @@ def yaml_to_text(yaml_data: dict, parent_key: str = '') -> str:
     lines = []
 
     param_mappings = {
-        'B': 'beam', 'Lpp': 'length between perpendiculars', 'Cb': 'block coefficient',
-        'Cm': 'prismatic coefficient', 'Cp': 'pitch coefficient', 'Cw': 'waterplane coefficient',
-        'Loa': 'length overall', 'Lwl': 'waterline length', 'TM': 'mean draft',
-        'Vol': 'volume', 'Srea': 'wetted surface area', 'KM': 'metacentric height',
-        'B_bulb': 'bulb beam', 'Lb': 'bulb length', 'ZFPU': 'bulb forward upper position',
-        'ZFPd': 'bulb forward lower position', 'Zb': 'bulb vertical position',
-        'dboss': 'bulb diameter', 'vbulb': 'bulb volume',
-        'xatb': 'bulb tip position', 'xboss': 'bulb boss position',
-        'xtran': 'bulb transition position', 'xclear': 'bulb clearance',
-        'B_T': 'draft to depth ratio', 'Cba': 'aft block coefficient',
-        'Cbf': 'fore block coefficient', 'Cpa': 'aft prismatic coefficient',
-        'Cpf': 'fore prismatic coefficient', 'Cpv': 'vertical prismatic coefficient',
-        'S_Lpp': 'slenderness ratio', 'S_Vol': 'volume coefficient',
-        'Xb': 'longitudinal center of buoyancy',
-        'g': 'gravity',
-        'hRef': 'reference height',
-        'nu': 'kinematic viscosity',
-        'rho': 'density',
-        'Umean': 'mean velocity',
-        'sigma': 'surface tension',
+        "B": "beam",
+        "Lpp": "length between perpendiculars",
+        "Cb": "block coefficient",
+        "Cm": "prismatic coefficient",
+        "Cp": "pitch coefficient",
+        "Cw": "waterplane coefficient",
+        "Loa": "length overall",
+        "Lwl": "waterline length",
+        "TM": "mean draft",
+        "Vol": "volume",
+        "Srea": "wetted surface area",
+        "KM": "metacentric height",
+        "B_bulb": "bulb beam",
+        "Lb": "bulb length",
+        "ZFPU": "bulb forward upper position",
+        "ZFPd": "bulb forward lower position",
+        "Zb": "bulb vertical position",
+        "dboss": "bulb diameter",
+        "vbulb": "bulb volume",
+        "xatb": "bulb tip position",
+        "xboss": "bulb boss position",
+        "xtran": "bulb transition position",
+        "xclear": "bulb clearance",
+        "B_T": "draft to depth ratio",
+        "Cba": "aft block coefficient",
+        "Cbf": "fore block coefficient",
+        "Cpa": "aft prismatic coefficient",
+        "Cpf": "fore prismatic coefficient",
+        "Cpv": "vertical prismatic coefficient",
+        "S_Lpp": "slenderness ratio",
+        "S_Vol": "volume coefficient",
+        "Xb": "longitudinal center of buoyancy",
+        "g": "gravity",
+        "hRef": "reference height",
+        "nu": "kinematic viscosity",
+        "rho": "density",
+        "Umean": "mean velocity",
+        "sigma": "surface tension",
     }
 
     def format_value(v):
@@ -141,30 +159,30 @@ def yaml_to_text(yaml_data: dict, parent_key: str = '') -> str:
 
     for key, value in yaml_data.items():
         if isinstance(value, dict):
-            section_name = key.replace('_', ' ').title()
+            section_name = key.replace("_", " ").title()
             lines.append(f"The {section_name} section:")
             for sub_key, sub_value in value.items():
                 if isinstance(sub_value, dict):
-                    sub_name = sub_key.replace('_', ' ').title()
+                    sub_name = sub_key.replace("_", " ").title()
                     for k, v in sub_value.items():
-                        param_name = param_mappings.get(k, k.replace('_', ' '))
+                        param_name = param_mappings.get(k, k.replace("_", " "))
                         lines.append(f"  {sub_name} {param_name}: {format_value(v)}")
                 else:
-                    param_name = param_mappings.get(sub_key, sub_key.replace('_', ' '))
+                    param_name = param_mappings.get(sub_key, sub_key.replace("_", " "))
                     lines.append(f"  {param_name}: {format_value(sub_value)}")
         else:
-            param_name = param_mappings.get(key, key.replace('_', ' '))
+            param_name = param_mappings.get(key, key.replace("_", " "))
             lines.append(f"{param_name} is {format_value(value)}.")
 
-    return ' '.join(lines)
+    return " ".join(lines)
 
 
 def yaml_to_numeric(yaml_data: dict) -> tuple[list[str], np.ndarray]:
     values = []
 
-    def visit(node, prefix=''):
+    def visit(node, prefix=""):
         for key in sorted(node):
-            path = f'{prefix}.{key}' if prefix else key
+            path = f"{prefix}.{key}" if prefix else key
             value = node[key]
             if isinstance(value, dict):
                 visit(value, path)
@@ -175,7 +193,7 @@ def yaml_to_numeric(yaml_data: dict) -> tuple[list[str], np.ndarray]:
     keys = [key for key, _value in values]
     vector = np.asarray([value for _key, value in values], dtype=np.float32)
     if not np.isfinite(vector).all():
-        raise ValueError('Ship condition parameters contain non-finite values')
+        raise ValueError("Ship condition parameters contain non-finite values")
     return keys, vector
 
 
@@ -187,11 +205,11 @@ def find_ship_params_file(data_dir: str, params_path: str | None = None) -> str:
     matches = sorted(
         os.path.join(data_dir, name)
         for name in os.listdir(data_dir)
-        if name.startswith('ship_params_') and name.endswith('.yaml')
+        if name.startswith("ship_params_") and name.endswith(".yaml")
     )
     if len(matches) != 1:
         raise FileNotFoundError(
-            f'Expected exactly one ship_params_*.yaml in {data_dir}, found {len(matches)}'
+            f"Expected exactly one ship_params_*.yaml in {data_dir}, found {len(matches)}"
         )
     return matches[0]
 
@@ -201,9 +219,9 @@ def copy_condition_normalization_params(params):
     if params is None:
         return None
     return {
-        'keys': np.asarray(params['keys']).copy(),
-        'mean': np.asarray(params['mean'], dtype=np.float32).copy(),
-        'std': np.asarray(params['std'], dtype=np.float32).copy(),
+        "keys": np.asarray(params["keys"]).copy(),
+        "mean": np.asarray(params["mean"], dtype=np.float32).copy(),
+        "std": np.asarray(params["std"], dtype=np.float32).copy(),
     }
 
 
@@ -226,12 +244,12 @@ class IrregularFlowFieldDataset(IrregularPairDataset):
         output_channels: list[str] | None = None,
         normalize: bool = True,
         prefer_cache: bool = True,
-        cache_filename: str = 'flow_cache.npz',
+        cache_filename: str = "flow_cache.npz",
         rollout_holdout_steps: int = 0,
         normalization_params: dict[str, np.ndarray] | None = None,
         _defer_normalization: bool = False,
     ):
-        self.split = 'train'
+        self.split = "train"
         self.normalize = normalize
         self.prefer_cache = prefer_cache
         self.cache_filename = cache_filename
@@ -273,8 +291,11 @@ class IrregularFlowFieldDataset(IrregularPairDataset):
                 return
 
         timestep_files = sorted(
-            (f for f in os.listdir(data_dir)
-             if f.startswith('timestep_') and f.endswith('.csv')),
+            (
+                f
+                for f in os.listdir(data_dir)
+                if f.startswith("timestep_") and f.endswith(".csv")
+            ),
             key=_timestep_sort_key,
         )
 
@@ -322,21 +343,21 @@ class PatchFlowFieldDataset(PatchPairDataset):
         distance_threshold_2: float = 1.5,
         enable_distance_refine: bool = True,
         enable_downsample: bool = True,
-        downsample_method: str = 'uniform',
+        downsample_method: str = "uniform",
         downsample_ratio: float = 0.25,
         include_coordinates: bool = True,
         output_dim: int = 4,
         normalize: bool = True,
-        split: str = 'train',
+        split: str = "train",
         train_ratio: float = 0.8,
         seed: int = 42,
         enable_params: bool = False,
         params_path: str | None = None,
-        embedding_filename: str = 'ship_params_embedding.pt',
-        embedding_mode: str = 'precomputed',
+        embedding_filename: str = "ship_params_embedding.pt",
+        embedding_mode: str = "precomputed",
         zero_embedding_dim: int = 0,
         prefer_cache: bool = True,
-        cache_filename: str = 'flow_cache.npz',
+        cache_filename: str = "flow_cache.npz",
         rollout_holdout_steps: int = 0,
         normalization_params: dict[str, np.ndarray] | None = None,
         condition_normalization_params: dict[str, np.ndarray] | None = None,
@@ -388,8 +409,11 @@ class PatchFlowFieldDataset(PatchPairDataset):
 
     def _get_timestep_files(self) -> list[str]:
         files = sorted(
-            (f for f in os.listdir(self.data_dir)
-             if f.startswith('timestep_') and f.endswith('.csv')),
+            (
+                f
+                for f in os.listdir(self.data_dir)
+                if f.startswith("timestep_") and f.endswith(".csv")
+            ),
             key=_timestep_sort_key,
         )
         return [os.path.join(self.data_dir, f) for f in files]
@@ -399,7 +423,7 @@ class PatchFlowFieldDataset(PatchPairDataset):
 
         coords = df[list(SHIP_COORD_CHANNELS)].to_numpy(dtype=np.float32)
 
-        requested = DEFAULT_SHIP_CHANNELS[:self.output_dim]
+        requested = DEFAULT_SHIP_CHANNELS[: self.output_dim]
         flow_values = df[requested].to_numpy(dtype=np.float32)
 
         return coords, flow_values
@@ -410,7 +434,7 @@ class PatchFlowFieldDataset(PatchPairDataset):
             if cached is not None:
                 coords, all_flows, channel_names = cached
                 # Select cache channels by name, mirroring the irregular path.
-                requested = DEFAULT_SHIP_CHANNELS[:self.output_dim]
+                requested = DEFAULT_SHIP_CHANNELS[: self.output_dim]
                 channel_to_idx = {name: i for i, name in enumerate(channel_names)}
                 missing = [name for name in requested if name not in channel_to_idx]
                 if missing:
@@ -449,9 +473,7 @@ class PatchFlowFieldDataset(PatchPairDataset):
         if self.enable_downsample:
             target_points = max(4, int(self.patch_size * self.downsample_ratio))
             self.quadtree.downsample_patches_by_distance(
-                method=self.downsample_method,
-                target_points=target_points,
-                min_points=4
+                method=self.downsample_method, target_points=target_points, min_points=4
             )
 
         self.num_patches = len(self.quadtree.patches)
@@ -463,21 +485,25 @@ class PatchFlowFieldDataset(PatchPairDataset):
         self.input_dim = self.coord_dim + self.output_dim
 
     def _load_ship_params(self) -> None:
-        if self.embedding_mode == 'zero':
+        if self.embedding_mode == "zero":
             if self.zero_embedding_dim <= 0:
-                raise ValueError("zero_embedding_dim must be > 0 when embedding_mode='zero'")
-            self.params_embedding = torch.zeros(self.zero_embedding_dim, dtype=torch.float32)
-            self.params_text = 'Zero parameter embedding.'
+                raise ValueError(
+                    "zero_embedding_dim must be > 0 when embedding_mode='zero'"
+                )
+            self.params_embedding = torch.zeros(
+                self.zero_embedding_dim, dtype=torch.float32
+            )
+            self.params_text = "Zero parameter embedding."
             self.embedding_dim = self.zero_embedding_dim
             return
 
-        if self.embedding_mode == 'precomputed':
+        if self.embedding_mode == "precomputed":
             embedding_path = os.path.join(self.data_dir, self.embedding_filename)
             if not os.path.isfile(embedding_path):
                 raise FileNotFoundError(embedding_path)
-            data = torch.load(embedding_path, map_location='cpu', weights_only=True)
-            self.params_embedding = data['embedding'].float()
-            self.params_text = data.get('params_text', '')
+            data = torch.load(embedding_path, map_location="cpu", weights_only=True)
+            self.params_embedding = data["embedding"].float()
+            self.params_text = data.get("params_text", "")
             self.embedding_dim = self.params_embedding.shape[-1]
             print(
                 f"Loaded pre-computed embedding from {embedding_path}, "
@@ -485,9 +511,9 @@ class PatchFlowFieldDataset(PatchPairDataset):
             )
             return
 
-        if self.embedding_mode == 'numeric':
+        if self.embedding_mode == "numeric":
             yaml_path = find_ship_params_file(self.data_dir, self.params_path)
-            with open(yaml_path, encoding='utf-8') as handle:
+            with open(yaml_path, encoding="utf-8") as handle:
                 yaml_data = yaml.safe_load(handle)
             self.condition_keys, self.raw_params_vector = yaml_to_numeric(yaml_data)
             self.params_text = yaml_to_text(yaml_data)
@@ -497,42 +523,36 @@ class PatchFlowFieldDataset(PatchPairDataset):
                     self._condition_normalization_params
                 )
             else:
-                self.params_embedding = torch.from_numpy(
-                    self.raw_params_vector.copy()
-                )
+                self.params_embedding = torch.from_numpy(self.raw_params_vector.copy())
             return
 
         raise ValueError(f"Unknown embedding_mode: {self.embedding_mode}")
 
-    def set_condition_normalization_params(
-        self, params: dict[str, np.ndarray]
-    ) -> None:
-        if self.embedding_mode != 'numeric':
+    def set_condition_normalization_params(self, params: dict[str, np.ndarray]) -> None:
+        if self.embedding_mode != "numeric":
             return
-        keys = list(params['keys'])
+        keys = list(params["keys"])
         if keys != self.condition_keys:
-            raise ValueError('Numeric ship parameter schemas do not match')
+            raise ValueError("Numeric ship parameter schemas do not match")
         self._condition_normalization_params = {
-            'keys': np.asarray(keys),
-            'mean': np.asarray(params['mean'], dtype=np.float32),
-            'std': np.asarray(params['std'], dtype=np.float32),
+            "keys": np.asarray(keys),
+            "mean": np.asarray(params["mean"], dtype=np.float32),
+            "std": np.asarray(params["std"], dtype=np.float32),
         }
         normalized = (
-            self.raw_params_vector - self._condition_normalization_params['mean']
-        ) / self._condition_normalization_params['std']
+            self.raw_params_vector - self._condition_normalization_params["mean"]
+        ) / self._condition_normalization_params["std"]
         self.params_embedding = torch.from_numpy(normalized.astype(np.float32))
 
     def get_condition_normalization_params(self):
-        return copy_condition_normalization_params(
-            self._condition_normalization_params
-        )
+        return copy_condition_normalization_params(self._condition_normalization_params)
 
     def get_params_embedding(self) -> torch.Tensor | None:
-        return getattr(self, 'params_embedding', None)
+        return getattr(self, "params_embedding", None)
 
     def get_params_text(self) -> str:
         """Return the ship parameters as text description."""
-        return getattr(self, 'params_text', '')
+        return getattr(self, "params_text", "")
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         time_idx = int(self.pair_indices[idx])
@@ -550,27 +570,27 @@ class PatchFlowFieldDataset(PatchPairDataset):
         mask = self._create_mask()
 
         result: dict[str, Any] = {
-            'input': input_patches,
-            'output': output_patches,
-            'mask': mask,
-            'time_index': torch.tensor(time_idx, dtype=torch.long),
+            "input": input_patches,
+            "output": output_patches,
+            "mask": mask,
+            "time_index": torch.tensor(time_idx, dtype=torch.long),
         }
-        if self.split != 'train':
-            result['full_target'] = torch.from_numpy(output_flows_norm).float()
+        if self.split != "train":
+            result["full_target"] = torch.from_numpy(output_flows_norm).float()
 
         if self.enable_params:
             embedding = self.get_params_embedding()
             if embedding is not None:
-                result['params_embedding'] = embedding
+                result["params_embedding"] = embedding
             else:
-                result['params_text'] = self.get_params_text()
+                result["params_text"] = self.get_params_text()
 
         return result
 
 
 def create_irregular_dataloader(
     data_dir: str,
-    split: str = 'train',
+    split: str = "train",
     batch_size: int = 8,
     shuffle: bool = True,
     num_workers: int = 0,
@@ -599,7 +619,7 @@ def create_irregular_dataloader(
 
 def create_patch_dataloader(
     data_dir: str,
-    split: str = 'train',
+    split: str = "train",
     batch_size: int = 4,
     shuffle: bool = True,
     num_workers: int = 0,
@@ -652,7 +672,7 @@ class MultiConditionIrregularDataset(MultiConditionIrregularDatasetMixin):
         seed: int = 42,
         output_channels: list[str] | None = None,
         normalize: bool = True,
-        split: str = 'train',
+        split: str = "train",
         max_points: int | None = None,
         rollout_holdout_steps: int = 0,
         normalization_params: dict[str, np.ndarray] | None = None,
@@ -681,14 +701,18 @@ class MultiConditionIrregularDataset(MultiConditionIrregularDatasetMixin):
             self.sub_datasets.append(ds)
 
         if normalize and normalization_params is None:
-            normalization_params = compute_global_normalization_params(self.sub_datasets)
+            normalization_params = compute_global_normalization_params(
+                self.sub_datasets
+            )
             for ds in self.sub_datasets:
                 ds.set_normalization_params(normalization_params)
         self.normalization_params = copy_normalization_params(normalization_params)
 
         actual_max_points = max(ds.n_points for ds in self.sub_datasets)
         if max_points is not None and max_points < actual_max_points:
-            raise ValueError("max_points cannot be smaller than a condition's full point count")
+            raise ValueError(
+                "max_points cannot be smaller than a condition's full point count"
+            )
         self.global_max_points = max_points or actual_max_points
 
         self.n_channels = self.sub_datasets[0].n_channels
@@ -700,8 +724,10 @@ class MultiConditionIrregularDataset(MultiConditionIrregularDatasetMixin):
         print(f"  总样本数: {len(self._index_map)}")
         print(f"  全局 max_points: {self.global_max_points}")
         for i, ds in enumerate(self.sub_datasets):
-            print(f"  工况 {i} ({os.path.basename(ds.data_dir)}): "
-                  f"{len(ds)} 样本, {ds.n_points} points")
+            print(
+                f"  工况 {i} ({os.path.basename(ds.data_dir)}): "
+                f"{len(ds)} 样本, {ds.n_points} points"
+            )
 
 
 class MultiConditionPatchDataset(MultiConditionPatchDatasetMixin):
@@ -731,21 +757,21 @@ class MultiConditionPatchDataset(MultiConditionPatchDatasetMixin):
         distance_threshold_2: float = 1.5,
         enable_distance_refine: bool = True,
         enable_downsample: bool = True,
-        downsample_method: str = 'uniform',
+        downsample_method: str = "uniform",
         downsample_ratio: float = 0.25,
         include_coordinates: bool = True,
         output_dim: int = 4,
         normalize: bool = True,
-        split: str = 'train',
+        split: str = "train",
         train_ratio: float = 0.8,
         seed: int = 42,
         enable_params: bool = False,
         params_path: str | None = None,
-        embedding_filename: str = 'ship_params_embedding.pt',
-        embedding_mode: str = 'precomputed',
+        embedding_filename: str = "ship_params_embedding.pt",
+        embedding_mode: str = "precomputed",
         zero_embedding_dim: int = 0,
         prefer_cache: bool = True,
-        cache_filename: str = 'flow_cache.npz',
+        cache_filename: str = "flow_cache.npz",
         max_patches: int | None = None,
         max_points: int | None = None,
         max_full_points: int | None = None,
@@ -794,7 +820,9 @@ class MultiConditionPatchDataset(MultiConditionPatchDatasetMixin):
             self.sub_datasets.append(ds)
 
         if normalize and normalization_params is None:
-            normalization_params = compute_global_normalization_params(self.sub_datasets)
+            normalization_params = compute_global_normalization_params(
+                self.sub_datasets
+            )
             for ds in self.sub_datasets:
                 ds.set_normalization_params(normalization_params)
         self.normalization_params = copy_normalization_params(normalization_params)
@@ -817,11 +845,11 @@ class MultiConditionPatchDataset(MultiConditionPatchDatasetMixin):
         self.input_dim = self.sub_datasets[0].input_dim
         self.output_dim = self.sub_datasets[0].output_dim
         self.condition_normalization_params = None
-        if enable_params and embedding_mode == 'numeric':
+        if enable_params and embedding_mode == "numeric":
             if condition_normalization_params is None:
                 schema = self.sub_datasets[0].condition_keys
                 if any(ds.condition_keys != schema for ds in self.sub_datasets):
-                    raise ValueError('Numeric ship parameter schemas do not match')
+                    raise ValueError("Numeric ship parameter schemas do not match")
                 values = np.stack(
                     [ds.raw_params_vector for ds in self.sub_datasets], axis=0
                 )
@@ -829,23 +857,21 @@ class MultiConditionPatchDataset(MultiConditionPatchDatasetMixin):
                 std = values.std(axis=0)
                 std[std < 1e-8] = 1.0
                 condition_normalization_params = {
-                    'keys': np.asarray(schema),
-                    'mean': mean.astype(np.float32),
-                    'std': std.astype(np.float32),
+                    "keys": np.asarray(schema),
+                    "mean": mean.astype(np.float32),
+                    "std": std.astype(np.float32),
                 }
             for ds in self.sub_datasets:
-                ds.set_condition_normalization_params(
-                    condition_normalization_params
-                )
-            self.condition_normalization_params = (
-                copy_condition_normalization_params(
-                    condition_normalization_params
-                )
+                ds.set_condition_normalization_params(condition_normalization_params)
+            self.condition_normalization_params = copy_condition_normalization_params(
+                condition_normalization_params
             )
 
         self.embedding_dim = 0
         if enable_params:
-            embedding_dims = [getattr(ds, 'embedding_dim', 0) for ds in self.sub_datasets]
+            embedding_dims = [
+                getattr(ds, "embedding_dim", 0) for ds in self.sub_datasets
+            ]
             nonzero_dims = [dim for dim in embedding_dims if dim > 0]
             if nonzero_dims:
                 if len(nonzero_dims) != len(embedding_dims):
@@ -853,7 +879,9 @@ class MultiConditionPatchDataset(MultiConditionPatchDatasetMixin):
                         f"Some condition directories are missing embeddings: {embedding_dims}"
                     )
                 if len(set(nonzero_dims)) != 1:
-                    raise ValueError(f"Inconsistent ship parameter embedding dims: {embedding_dims}")
+                    raise ValueError(
+                        f"Inconsistent ship parameter embedding dims: {embedding_dims}"
+                    )
                 self.embedding_dim = nonzero_dims[0]
 
         self._build_index_map()
@@ -864,11 +892,10 @@ class MultiConditionPatchDataset(MultiConditionPatchDatasetMixin):
         print(f"  全局 max_patches: {self.global_max_patches}")
         print(f"  全局 max_points: {self.global_max_points}")
         for i, ds in enumerate(self.sub_datasets):
-            print(f"  工况 {i} ({os.path.basename(ds.data_dir)}): "
-                  f"{len(ds)} 样本, {ds.num_patches} patches, {ds.max_points} max_points")
+            print(
+                f"  工况 {i} ({os.path.basename(ds.data_dir)}): "
+                f"{len(ds)} 样本, {ds.num_patches} patches, {ds.max_points} max_points"
+            )
 
     def get_condition_normalization_params(self):
-        return copy_condition_normalization_params(
-            self.condition_normalization_params
-        )
-
+        return copy_condition_normalization_params(self.condition_normalization_params)

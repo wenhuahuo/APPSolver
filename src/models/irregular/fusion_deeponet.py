@@ -26,7 +26,6 @@ intermediate size via a learnable linear layer applied per-node before pooling,
 so the model is resolution-invariant and works with any N.
 """
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,6 +33,7 @@ import torch.nn.functional as F
 # ---------------------------------------------------------------------------
 # Fused activation layer: tanh + sin mixture (mirrors JAX implementation)
 # ---------------------------------------------------------------------------
+
 
 class FusedActivationLayer(nn.Module):
     """
@@ -50,11 +50,11 @@ class FusedActivationLayer(nn.Module):
         self.linear = nn.Linear(in_features, out_features)
 
         # Scalar learnable parameters (initialised to match JAX defaults)
-        self.A  = nn.Parameter(torch.full((1,), 0.1))   # tanh amplitude scale
-        self.c  = nn.Parameter(torch.full((1,), 0.1))   # tanh phase
-        self.a1 = nn.Parameter(torch.full((1,), 0.0))   # sin amplitude
-        self.F1 = nn.Parameter(torch.full((1,), 0.1))   # sin frequency scale
-        self.c1 = nn.Parameter(torch.full((1,), 0.0))   # sin phase
+        self.A = nn.Parameter(torch.full((1,), 0.1))  # tanh amplitude scale
+        self.c = nn.Parameter(torch.full((1,), 0.1))  # tanh phase
+        self.a1 = nn.Parameter(torch.full((1,), 0.0))  # sin amplitude
+        self.F1 = nn.Parameter(torch.full((1,), 0.1))  # sin frequency scale
+        self.c1 = nn.Parameter(torch.full((1,), 0.0))  # sin phase
 
         # Weight initialisation: Glorot normal
         nn.init.xavier_normal_(self.linear.weight)
@@ -62,14 +62,15 @@ class FusedActivationLayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z = self.linear(x)
-        tanh_part = 10.0 * self.A  * torch.tanh(10.0 * self.A  * z + self.c)
-        sin_part  = 10.0 * self.a1 * torch.sin(10.0 * self.F1 * z + self.c1)
+        tanh_part = 10.0 * self.A * torch.tanh(10.0 * self.A * z + self.c)
+        sin_part = 10.0 * self.a1 * torch.sin(10.0 * self.F1 * z + self.c1)
         return tanh_part + sin_part
 
 
 # ---------------------------------------------------------------------------
 # Fused MLP with skip connections (mirrors fnn_fuse_mixed_add in JAX)
 # ---------------------------------------------------------------------------
+
 
 class FusedMLP(nn.Module):
     """
@@ -86,10 +87,9 @@ class FusedMLP(nn.Module):
 
         # Hidden fused layers (all but the last transition)
         n_hidden = len(layers) - 2
-        self.fused_layers = nn.ModuleList([
-            FusedActivationLayer(layers[i], layers[i + 1])
-            for i in range(n_hidden)
-        ])
+        self.fused_layers = nn.ModuleList(
+            [FusedActivationLayer(layers[i], layers[i + 1]) for i in range(n_hidden)]
+        )
         # Final linear output layer
         self.out_layer = nn.Linear(layers[-2], layers[-1])
         nn.init.xavier_normal_(self.out_layer.weight)
@@ -105,7 +105,7 @@ class FusedMLP(nn.Module):
         for i, layer in enumerate(self.fused_layers):
             h = layer(h)
             if i > 0:
-                h = h + skips[-1]   # additive skip (matches JAX skip[i] += skip[i-1])
+                h = h + skips[-1]  # additive skip (matches JAX skip[i] += skip[i-1])
             skips.append(h)
         return self.out_layer(h)
 
@@ -113,6 +113,7 @@ class FusedMLP(nn.Module):
 # ---------------------------------------------------------------------------
 # Fused Branch+Trunk with cross-fusion  (mirrors fnn_fuse_mixed_add)
 # ---------------------------------------------------------------------------
+
 
 class FusedBranchTrunk(nn.Module):
     """
@@ -128,21 +129,26 @@ class FusedBranchTrunk(nn.Module):
 
     def __init__(self, branch_layers: list, trunk_layers: list):
         super().__init__()
-        assert len(branch_layers) == len(trunk_layers), \
+        assert len(branch_layers) == len(trunk_layers), (
             "Branch and trunk must have the same depth"
+        )
 
         n_hidden = len(branch_layers) - 2
 
-        self.branch_hidden = nn.ModuleList([
-            FusedActivationLayer(branch_layers[i], branch_layers[i + 1])
-            for i in range(n_hidden)
-        ])
+        self.branch_hidden = nn.ModuleList(
+            [
+                FusedActivationLayer(branch_layers[i], branch_layers[i + 1])
+                for i in range(n_hidden)
+            ]
+        )
         self.branch_out = nn.Linear(branch_layers[-2], branch_layers[-1])
 
-        self.trunk_hidden = nn.ModuleList([
-            FusedActivationLayer(trunk_layers[i], trunk_layers[i + 1])
-            for i in range(n_hidden)
-        ])
+        self.trunk_hidden = nn.ModuleList(
+            [
+                FusedActivationLayer(trunk_layers[i], trunk_layers[i + 1])
+                for i in range(n_hidden)
+            ]
+        )
         self.trunk_out = nn.Linear(trunk_layers[-2], trunk_layers[-1])
 
         for linear in [self.branch_out, self.trunk_out]:
@@ -151,8 +157,8 @@ class FusedBranchTrunk(nn.Module):
 
     def forward(
         self,
-        xb: torch.Tensor,   # branch input: (B, branch_in)
-        xt: torch.Tensor,   # trunk  input: (B, N, trunk_in)
+        xb: torch.Tensor,  # branch input: (B, branch_in)
+        xt: torch.Tensor,  # trunk  input: (B, N, trunk_in)
     ):
         """
         Returns:
@@ -185,6 +191,7 @@ class FusedBranchTrunk(nn.Module):
 # Branch encoder: node-wise projection + global pooling
 # ---------------------------------------------------------------------------
 
+
 class BranchEncoder(nn.Module):
     """
     Encodes the input flow field fx: (B, N, C_in) into a global vector (B, branch_dim).
@@ -206,13 +213,14 @@ class BranchEncoder(nn.Module):
         fx: (B, N, C_in)
         returns: (B, branch_dim)  – mean-pooled global representation
         """
-        h = self.node_proj(fx)      # (B, N, branch_dim)
-        return h.mean(dim=1)        # (B, branch_dim)
+        h = self.node_proj(fx)  # (B, N, branch_dim)
+        return h.mean(dim=1)  # (B, branch_dim)
 
 
 # ---------------------------------------------------------------------------
 # Main model
 # ---------------------------------------------------------------------------
+
 
 class FusionDeepONet(nn.Module):
     """
@@ -229,17 +237,17 @@ class FusionDeepONet(nn.Module):
 
     def __init__(
         self,
-        in_channels:  int = 2,
+        in_channels: int = 2,
         out_channels: int = 2,
-        hidden_dim:   int = 64,
-        n_layers:     int = 3,
-        G_dim:        int = 64,
-        coord_dim:    int = 2,
+        hidden_dim: int = 64,
+        n_layers: int = 3,
+        G_dim: int = 64,
+        coord_dim: int = 2,
     ):
         super().__init__()
-        self.in_channels  = in_channels
+        self.in_channels = in_channels
         self.out_channels = out_channels
-        self.G_dim        = G_dim
+        self.G_dim = G_dim
 
         # Branch encoder: fx (B, N, C) → (B, branch_dim)
         branch_dim = hidden_dim
@@ -249,35 +257,35 @@ class FusionDeepONet(nn.Module):
         # branch: branch_dim → [hidden]*n_layers → out_channels * G_dim
         # trunk:  coord_dim  → [hidden]*n_layers → G_dim
         branch_layers = [branch_dim] + [hidden_dim] * n_layers + [out_channels * G_dim]
-        trunk_layers  = [coord_dim]  + [hidden_dim] * n_layers + [G_dim]
+        trunk_layers = [coord_dim] + [hidden_dim] * n_layers + [G_dim]
 
         self.fused_net = FusedBranchTrunk(branch_layers, trunk_layers)
 
     def forward(
         self,
-        pos: torch.Tensor,   # (B, N, 2)  spatial coordinates
-        fx:  torch.Tensor,   # (B, N, C)  input flow field
+        pos: torch.Tensor,  # (B, N, 2)  spatial coordinates
+        fx: torch.Tensor,  # (B, N, C)  input flow field
     ) -> torch.Tensor:
         """
         Returns predicted flow field at next timestep: (B, N, out_channels)
         """
         B, N, _ = pos.shape
-        C_out    = self.out_channels
-        G        = self.G_dim
+        C_out = self.out_channels
+        G = self.G_dim
 
         # 1. Encode input function → global branch vector
-        branch_in = self.branch_encoder(fx)              # (B, branch_dim)
+        branch_in = self.branch_encoder(fx)  # (B, branch_dim)
 
         # 2. Fused trunk + branch forward
-        yt, yb = self.fused_net(branch_in, pos)          # yt: (B, N, G), yb: (B, C_out*G)
+        yt, yb = self.fused_net(branch_in, pos)  # yt: (B, N, G), yb: (B, C_out*G)
 
         # 3. Reshape branch output to (B, C_out, G)
-        yb = yb.view(B, C_out, G)                        # (B, C_out, G)
+        yb = yb.view(B, C_out, G)  # (B, C_out, G)
 
         # 4. Dot product for each output channel:
         #    pred[b, n, c] = sum_g  yb[b, c, g] * yt[b, n, g]
         #    equivalent to the original einsum: 'ijkl,inkm->inl'
-        pred = torch.einsum('bcg,bng->bnc', yb, yt)      # (B, N, C_out)
+        pred = torch.einsum("bcg,bng->bnc", yb, yt)  # (B, N, C_out)
 
         return pred
 
@@ -286,25 +294,26 @@ class FusionDeepONet(nn.Module):
 # Loss wrapper (consistent with other models in this directory)
 # ---------------------------------------------------------------------------
 
+
 class FusionDeepONetLoss(nn.Module):
     """
     MSE loss with optional relative L2 metric logging.
     """
 
-    def __init__(self, reduction: str = 'mean'):
+    def __init__(self, reduction: str = "mean"):
         super().__init__()
         self.reduction = reduction
 
     def forward(
         self,
-        pred:   torch.Tensor,   # (B, N, C)
-        target: torch.Tensor,   # (B, N, C)
+        pred: torch.Tensor,  # (B, N, C)
+        target: torch.Tensor,  # (B, N, C)
     ) -> torch.Tensor:
         return F.mse_loss(pred, target, reduction=self.reduction)
 
     @staticmethod
     def relative_l2(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Relative L2 error (scalar)."""
-        diff_norm   = torch.linalg.norm(pred.flatten() - target.flatten())
+        diff_norm = torch.linalg.norm(pred.flatten() - target.flatten())
         target_norm = torch.linalg.norm(target.flatten())
         return diff_norm / (target_norm + 1e-8)

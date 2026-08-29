@@ -39,22 +39,22 @@ def _load_npz_cache(cache_path: str) -> tuple[np.ndarray, np.ndarray, list[str]]
         return None
 
     data = np.load(cache_path, allow_pickle=False)
-    if 'coords' not in data or 'flows' not in data or 'channels' not in data:
+    if "coords" not in data or "flows" not in data or "channels" not in data:
         raise ValueError(
-            f'Incomplete CFDBench cache: {cache_path}; rebuild it with '
-            'scripts/build_cfdbench_flow_cache.py'
+            f"Incomplete CFDBench cache: {cache_path}; rebuild it with "
+            "scripts/build_cfdbench_flow_cache.py"
         )
 
-    coords = data['coords'].astype(np.float32, copy=False)
-    flows = data['flows'].astype(np.float32, copy=False)
-    channels = [str(c) for c in data['channels'].tolist()]
+    coords = data["coords"].astype(np.float32, copy=False)
+    flows = data["flows"].astype(np.float32, copy=False)
+    channels = [str(c) for c in data["channels"].tolist()]
     return coords, flows, channels
 
 
 CFD_COLUMN_ALIASES = {
-    'volume-fraction-water': 'water-vof',
-    'y-velocity-water': 'y-velocity',
-    'x-velocity-water': 'x-velocity',
+    "volume-fraction-water": "water-vof",
+    "y-velocity-water": "y-velocity",
+    "x-velocity-water": "x-velocity",
 }
 
 
@@ -90,15 +90,15 @@ class CFDBenchIrregularDataset(IrregularPairDataset):
     def __init__(
         self,
         root: str,
-        benchmark: str = '03_damflow',
-        case: str = 'case0',
+        benchmark: str = "03_damflow",
+        case: str = "case0",
         step_size: int = 1,
         train_ratio: float = 0.8,
         seed: int = 42,
         output_channels: list[str] | None = None,
         normalize: bool = True,
         prefer_cache: bool = True,
-        cache_filename: str = 'flow_cache.npz',
+        cache_filename: str = "flow_cache.npz",
         rollout_holdout_steps: int = 0,
         normalization_params: dict | None = None,
         _defer_normalization: bool = False,
@@ -106,19 +106,17 @@ class CFDBenchIrregularDataset(IrregularPairDataset):
         self.root = root
         self.benchmark = benchmark
         self.case = case
-        self.split = 'train'
+        self.split = "train"
         self.normalize = normalize
         self.prefer_cache = prefer_cache
         self.cache_filename = cache_filename
         self.output_channels = _canonicalize_cfd_channels(
-            output_channels or ['y-velocity', 'x-velocity']
+            output_channels or ["y-velocity", "x-velocity"]
         )
         self._init_temporal_pair(
             step_size=step_size,
             train_ratio=train_ratio,
-            split_seed=stable_condition_seed(
-                seed, os.path.join(root, benchmark, case)
-            ),
+            split_seed=stable_condition_seed(seed, os.path.join(root, benchmark, case)),
             rollout_holdout_steps=rollout_holdout_steps,
             normalization_params=normalization_params,
             defer_normalization=_defer_normalization,
@@ -152,20 +150,23 @@ class CFDBenchIrregularDataset(IrregularPairDataset):
                 self.n_channels = self.flows.shape[2]
                 return
 
-        data_files = sorted([
-            f for f in os.listdir(data_dir)
-            if f.startswith('data') and f.endswith('.txt')
-        ])
+        data_files = sorted(
+            [
+                f
+                for f in os.listdir(data_dir)
+                if f.startswith("data") and f.endswith(".txt")
+            ]
+        )
 
         coords_list = []
         flows_list = []
 
         for data_file in data_files:
             data_path = os.path.join(data_dir, data_file)
-            df = pd.read_csv(data_path, sep=r'\s+')
+            df = pd.read_csv(data_path, sep=r"\s+")
             df = _standardize_cfd_columns(df)
 
-            coords = df[['x-coordinate', 'y-coordinate']].to_numpy(dtype=np.float32)
+            coords = df[["x-coordinate", "y-coordinate"]].to_numpy(dtype=np.float32)
 
             flow_cols = [c for c in self.output_channels if c in df.columns]
             if not flow_cols:
@@ -210,21 +211,21 @@ class CFDBenchPatchDataset(PatchPairDataset):
     def __init__(
         self,
         root: str,
-        benchmark: str = '03_damflow',
-        case: str = 'case0',
+        benchmark: str = "03_damflow",
+        case: str = "case0",
         step_size: int = 1,
         patch_size: int = 64,
         enable_downsample: bool = True,
-        downsample_method: str = 'uniform',
+        downsample_method: str = "uniform",
         downsample_ratio: float = 0.25,
         include_coordinates: bool = True,
         output_dim: int = 2,
         normalize: bool = True,
-        split: str = 'train',
+        split: str = "train",
         train_ratio: float = 0.8,
         seed: int = 42,
         prefer_cache: bool = True,
-        cache_filename: str = 'flow_cache.npz',
+        cache_filename: str = "flow_cache.npz",
         rollout_holdout_steps: int = 0,
         normalization_params: dict | None = None,
         _defer_normalization: bool = False,
@@ -245,9 +246,7 @@ class CFDBenchPatchDataset(PatchPairDataset):
         self._init_temporal_pair(
             step_size=step_size,
             train_ratio=train_ratio,
-            split_seed=stable_condition_seed(
-                seed, os.path.join(root, benchmark, case)
-            ),
+            split_seed=stable_condition_seed(seed, os.path.join(root, benchmark, case)),
             rollout_holdout_steps=rollout_holdout_steps,
             normalization_params=normalization_params,
             defer_normalization=_defer_normalization,
@@ -268,36 +267,39 @@ class CFDBenchPatchDataset(PatchPairDataset):
                 coords, all_flows, channel_names = cached
                 channel_names = _canonicalize_cfd_channels(channel_names)
                 channel_to_idx = {name: i for i, name in enumerate(channel_names)}
-                required = ['y-velocity', 'x-velocity']
-                if not all(ch in channel_to_idx for ch in required[:self.output_dim]):
+                required = ["y-velocity", "x-velocity"]
+                if not all(ch in channel_to_idx for ch in required[: self.output_dim]):
                     raise ValueError(
                         f"Cache missing required CFD channels for output_dim={self.output_dim}; "
                         f"available: {channel_names}"
                     )
 
-                sel_idx = [channel_to_idx[ch] for ch in required[:self.output_dim]]
+                sel_idx = [channel_to_idx[ch] for ch in required[: self.output_dim]]
                 self.coords = coords
                 self.flows = all_flows[:, :, sel_idx]
                 self.num_points = self.coords.shape[1]
                 return
 
-        data_files = sorted([
-            f for f in os.listdir(data_dir)
-            if f.startswith('data') and f.endswith('.txt')
-        ])
+        data_files = sorted(
+            [
+                f
+                for f in os.listdir(data_dir)
+                if f.startswith("data") and f.endswith(".txt")
+            ]
+        )
 
         coords_list = []
         flows_list = []
 
         for data_file in data_files:
             data_path = os.path.join(data_dir, data_file)
-            df = pd.read_csv(data_path, sep=r'\s+')
+            df = pd.read_csv(data_path, sep=r"\s+")
             df = _standardize_cfd_columns(df)
 
-            coords = df[['x-coordinate', 'y-coordinate']].to_numpy(dtype=np.float32)
+            coords = df[["x-coordinate", "y-coordinate"]].to_numpy(dtype=np.float32)
 
-            flow_values = df[['y-velocity', 'x-velocity']].to_numpy(dtype=np.float32)
-            flow_values = flow_values[:, :self.output_dim]
+            flow_values = df[["y-velocity", "x-velocity"]].to_numpy(dtype=np.float32)
+            flow_values = flow_values[:, : self.output_dim]
 
             coords_list.append(coords)
             flows_list.append(flow_values)
@@ -329,9 +331,7 @@ class CFDBenchPatchDataset(PatchPairDataset):
         if self.enable_downsample:
             target_points = max(4, int(self.patch_size * self.downsample_ratio))
             self.quadtree.downsample_patches_by_distance(
-                method=self.downsample_method,
-                target_points=target_points,
-                min_points=4
+                method=self.downsample_method, target_points=target_points, min_points=4
             )
 
         self.num_patches = len(self.quadtree.patches)
@@ -353,19 +353,19 @@ class CFDBenchPatchDataset(PatchPairDataset):
         output_flows_norm = self._normalize_flows(output_flows)
 
         return {
-            'input': self._extract_patches(coords_norm, input_flows_norm),
-            'output': self._extract_flow_patches(output_flows_norm),
-            'mask': self._create_mask(),
-            'full_target': torch.from_numpy(output_flows_norm).float(),
-            'time_index': torch.tensor(time_idx, dtype=torch.long),
+            "input": self._extract_patches(coords_norm, input_flows_norm),
+            "output": self._extract_flow_patches(output_flows_norm),
+            "mask": self._create_mask(),
+            "full_target": torch.from_numpy(output_flows_norm).float(),
+            "time_index": torch.tensor(time_idx, dtype=torch.long),
         }
 
 
 def create_cfd_bench_irregular_dataloader(
     root: str,
-    benchmark: str = '03_damflow',
-    case: str = 'case0',
-    split: str = 'train',
+    benchmark: str = "03_damflow",
+    case: str = "case0",
+    split: str = "train",
     batch_size: int = 8,
     shuffle: bool = True,
     num_workers: int = 0,
@@ -394,9 +394,9 @@ def create_cfd_bench_irregular_dataloader(
 
 def create_cfd_bench_patch_dataloader(
     root: str,
-    benchmark: str = '03_damflow',
-    case: str = 'case0',
-    split: str = 'train',
+    benchmark: str = "03_damflow",
+    case: str = "case0",
+    split: str = "train",
     batch_size: int = 4,
     shuffle: bool = True,
     num_workers: int = 0,
@@ -452,13 +452,14 @@ class MultiConditionCFDBenchIrregularDataset(MultiConditionIrregularDatasetMixin
         seed: int = 42,
         output_channels: list[str] | None = None,
         normalize: bool = True,
-        split: str = 'train',
+        split: str = "train",
         max_points: int | None = None,
         rollout_holdout_steps: int = 0,
         normalization_params: dict | None = None,
     ):
-        assert len(roots) == len(benchmarks) == len(cases), \
+        assert len(roots) == len(benchmarks) == len(cases), (
             "roots, benchmarks, cases must have the same length"
+        )
 
         self.num_conditions = len(roots)
 
@@ -466,10 +467,14 @@ class MultiConditionCFDBenchIrregularDataset(MultiConditionIrregularDatasetMixin
         defer_normalization = normalize and normalization_params is None
 
         self.sub_datasets: list[CFDBenchIrregularDataset] = []
-        for i, (root, benchmark, case) in enumerate(zip(roots, benchmarks, cases, strict=True)):
+        for i, (root, benchmark, case) in enumerate(
+            zip(roots, benchmarks, cases, strict=True)
+        ):
             print(f"加载工况 {i} [{split}]: {benchmark}/{case}")
             ds = CFDBenchIrregularDataset(
-                root=root, benchmark=benchmark, case=case,
+                root=root,
+                benchmark=benchmark,
+                case=case,
                 seed=seed,
                 step_size=step_size,
                 train_ratio=train_ratio,
@@ -483,14 +488,18 @@ class MultiConditionCFDBenchIrregularDataset(MultiConditionIrregularDatasetMixin
             self.sub_datasets.append(ds)
 
         if normalize and normalization_params is None:
-            normalization_params = compute_global_normalization_params(self.sub_datasets)
+            normalization_params = compute_global_normalization_params(
+                self.sub_datasets
+            )
             for ds in self.sub_datasets:
                 ds.set_normalization_params(normalization_params)
         self.normalization_params = copy_normalization_params(normalization_params)
 
         actual_max_points = max(ds.n_points for ds in self.sub_datasets)
         if max_points is not None and max_points < actual_max_points:
-            raise ValueError("max_points cannot be smaller than a condition's full point count")
+            raise ValueError(
+                "max_points cannot be smaller than a condition's full point count"
+            )
         self.global_max_points = max_points or actual_max_points
 
         self.n_channels = self.sub_datasets[0].n_channels
@@ -502,8 +511,10 @@ class MultiConditionCFDBenchIrregularDataset(MultiConditionIrregularDatasetMixin
         print(f"  总样本数: {len(self._index_map)}")
         print(f"  全局 max_points: {self.global_max_points}")
         for i, ds in enumerate(self.sub_datasets):
-            print(f"  工况 {i} ({ds.benchmark}/{ds.case}): "
-                  f"{len(ds)} 样本, {ds.n_points} points")
+            print(
+                f"  工况 {i} ({ds.benchmark}/{ds.case}): "
+                f"{len(ds)} 样本, {ds.n_points} points"
+            )
 
     @classmethod
     def from_existing(cls, source, split: str, max_points: int | None = None):
@@ -535,12 +546,12 @@ class MultiConditionCFDBenchPatchDataset(MultiConditionPatchDatasetMixin):
         step_size: int = 1,
         patch_size: int = 64,
         enable_downsample: bool = True,
-        downsample_method: str = 'uniform',
+        downsample_method: str = "uniform",
         downsample_ratio: float = 0.25,
         include_coordinates: bool = True,
         output_dim: int = 2,
         normalize: bool = True,
-        split: str = 'train',
+        split: str = "train",
         train_ratio: float = 0.8,
         seed: int = 42,
         max_patches: int | None = None,
@@ -549,8 +560,9 @@ class MultiConditionCFDBenchPatchDataset(MultiConditionPatchDatasetMixin):
         rollout_holdout_steps: int = 0,
         normalization_params: dict | None = None,
     ):
-        assert len(roots) == len(benchmarks) == len(cases), \
+        assert len(roots) == len(benchmarks) == len(cases), (
             "roots, benchmarks, cases must have the same length"
+        )
 
         self.num_conditions = len(roots)
 
@@ -558,11 +570,16 @@ class MultiConditionCFDBenchPatchDataset(MultiConditionPatchDatasetMixin):
         defer_normalization = normalize and normalization_params is None
 
         self.sub_datasets: list[CFDBenchPatchDataset] = []
-        for i, (root, benchmark, case) in enumerate(zip(roots, benchmarks, cases, strict=True)):
+        for i, (root, benchmark, case) in enumerate(
+            zip(roots, benchmarks, cases, strict=True)
+        ):
             print(f"加载工况 {i} [{split}]: {benchmark}/{case}")
             ds = CFDBenchPatchDataset(
-                root=root, benchmark=benchmark, case=case,
-                split=split, seed=seed,
+                root=root,
+                benchmark=benchmark,
+                case=case,
+                split=split,
+                seed=seed,
                 step_size=step_size,
                 patch_size=patch_size,
                 enable_downsample=enable_downsample,
@@ -578,7 +595,9 @@ class MultiConditionCFDBenchPatchDataset(MultiConditionPatchDatasetMixin):
             self.sub_datasets.append(ds)
 
         if normalize and normalization_params is None:
-            normalization_params = compute_global_normalization_params(self.sub_datasets)
+            normalization_params = compute_global_normalization_params(
+                self.sub_datasets
+            )
             for ds in self.sub_datasets:
                 ds.set_normalization_params(normalization_params)
         self.normalization_params = copy_normalization_params(normalization_params)
@@ -609,12 +628,19 @@ class MultiConditionCFDBenchPatchDataset(MultiConditionPatchDatasetMixin):
         print(f"  全局 max_patches: {self.global_max_patches}")
         print(f"  全局 max_points: {self.global_max_points}")
         for i, ds in enumerate(self.sub_datasets):
-            print(f"  工况 {i} ({ds.benchmark}/{ds.case}): "
-                  f"{len(ds)} 样本, {ds.num_patches} patches, {ds.max_points} max_points")
+            print(
+                f"  工况 {i} ({ds.benchmark}/{ds.case}): "
+                f"{len(ds)} 样本, {ds.num_patches} patches, {ds.max_points} max_points"
+            )
 
     @classmethod
-    def from_existing(cls, source, split: str, max_patches: int | None = None,
-                      max_points: int | None = None):
+    def from_existing(
+        cls,
+        source,
+        split: str,
+        max_patches: int | None = None,
+        max_points: int | None = None,
+    ):
         dataset = super().from_existing(source, split)
         if max_patches is not None:
             dataset.global_max_patches = max_patches

@@ -73,12 +73,22 @@ def recover_points_knn(
     if neighbor_indices.ndim not in (2, 3):
         raise ValueError("neighbor_indices must have shape [N, K] or [B, N, K]")
     if neighbor_weights.shape != neighbor_indices.shape:
-        raise ValueError("neighbor_weights must have the same shape as neighbor_indices")
+        raise ValueError(
+            "neighbor_weights must have the same shape as neighbor_indices"
+        )
 
     unbatched = point_predictions.ndim == 2
     predictions = point_predictions.unsqueeze(0) if unbatched else point_predictions
-    indices = neighbor_indices.unsqueeze(0) if neighbor_indices.ndim == 2 else neighbor_indices
-    weights = neighbor_weights.unsqueeze(0) if neighbor_weights.ndim == 2 else neighbor_weights
+    indices = (
+        neighbor_indices.unsqueeze(0)
+        if neighbor_indices.ndim == 2
+        else neighbor_indices
+    )
+    weights = (
+        neighbor_weights.unsqueeze(0)
+        if neighbor_weights.ndim == 2
+        else neighbor_weights
+    )
 
     batch_size, n_pred, n_channels = predictions.shape
     n_points = indices.shape[-2]
@@ -90,21 +100,31 @@ def recover_points_knn(
 
     indices = indices.to(device=predictions.device, dtype=torch.long)
     weights = weights.to(device=predictions.device, dtype=predictions.dtype)
-    if indices.numel() and (indices.min().item() < 0 or indices.max().item() >= n_points):
+    if indices.numel() and (
+        indices.min().item() < 0 or indices.max().item() >= n_points
+    ):
         raise ValueError("neighbor_indices contains an out-of-range full point index")
 
     compact_predictions = None
     sample_idx = None
     if sampled_indices is not None:
-        sample_idx = sampled_indices.unsqueeze(0) if sampled_indices.ndim == 1 else sampled_indices
+        sample_idx = (
+            sampled_indices.unsqueeze(0)
+            if sampled_indices.ndim == 1
+            else sampled_indices
+        )
         if sample_idx.ndim != 2:
             raise ValueError("sampled_indices must have shape [S] or [B, S]")
         if sample_idx.shape[0] == 1 and batch_size != 1:
             sample_idx = sample_idx.expand(batch_size, -1)
         if sample_idx.shape[0] != batch_size:
-            raise ValueError("sampled_indices batch dimension does not match predictions")
+            raise ValueError(
+                "sampled_indices batch dimension does not match predictions"
+            )
         sample_idx = sample_idx.to(device=predictions.device, dtype=torch.long)
-        if sample_idx.numel() and (sample_idx.min().item() < 0 or sample_idx.max().item() >= n_points):
+        if sample_idx.numel() and (
+            sample_idx.min().item() < 0 or sample_idx.max().item() >= n_points
+        ):
             raise ValueError("sampled_indices contains an out-of-range point index")
 
         if n_pred == sample_idx.shape[1]:
@@ -115,7 +135,9 @@ def recover_points_knn(
         elif n_pred == n_points:
             source = predictions
         else:
-            raise ValueError("compact predictions and sampled_indices have different lengths")
+            raise ValueError(
+                "compact predictions and sampled_indices have different lengths"
+            )
     elif n_pred == n_points:
         source = predictions
     else:
@@ -131,7 +153,9 @@ def recover_points_knn(
     if sample_idx is not None:
         exact = compact_predictions
         if exact is None:
-            exact = source.gather(1, sample_idx.unsqueeze(-1).expand(-1, -1, n_channels))
+            exact = source.gather(
+                1, sample_idx.unsqueeze(-1).expand(-1, -1, n_channels)
+            )
         recovered = recovered.scatter(
             1, sample_idx.unsqueeze(-1).expand(-1, -1, n_channels), exact
         )
@@ -173,7 +197,11 @@ class MetricsCalculator:
         channel_abs_state = self.channel_abs_error
         channel_sq_state = self.channel_squared_error
         channel_target_state = self.channel_target_squared
-        if channel_abs_state is None or channel_sq_state is None or channel_target_state is None:
+        if (
+            channel_abs_state is None
+            or channel_sq_state is None
+            or channel_target_state is None
+        ):
             channel_abs_state = [0.0] * n_channels
             channel_sq_state = [0.0] * n_channels
             channel_target_state = [0.0] * n_channels
@@ -204,10 +232,15 @@ class MetricsCalculator:
         self.total_abs_error += sum(channel_abs)
         self.total_squared_error += sum(channel_squared)
         self.total_target_squared += sum(channel_target_squared)
-        self.channel_abs_error = [a + b for a, b in zip(channel_abs_state, channel_abs, strict=True)]
-        self.channel_squared_error = [a + b for a, b in zip(channel_sq_state, channel_squared, strict=True)]
+        self.channel_abs_error = [
+            a + b for a, b in zip(channel_abs_state, channel_abs, strict=True)
+        ]
+        self.channel_squared_error = [
+            a + b for a, b in zip(channel_sq_state, channel_squared, strict=True)
+        ]
         self.channel_target_squared = [
-            a + b for a, b in zip(channel_target_state, channel_target_squared, strict=True)
+            a + b
+            for a, b in zip(channel_target_state, channel_target_squared, strict=True)
         ]
 
     @staticmethod
@@ -238,9 +271,12 @@ class MetricsCalculator:
             "relative_l2": self._relative_l2(
                 self.total_squared_error, self.total_target_squared
             ),
-            "mae_per_channel": [value / self.point_count for value in self.channel_abs_error],
+            "mae_per_channel": [
+                value / self.point_count for value in self.channel_abs_error
+            ],
             "rmse_per_channel": [
-                math.sqrt(value / self.point_count) for value in self.channel_squared_error
+                math.sqrt(value / self.point_count)
+                for value in self.channel_squared_error
             ],
             "relative_l2_per_channel": [
                 self._relative_l2(error, target)

@@ -8,7 +8,6 @@ Paper: Fourier Neural Operator for Parametric Partial Differential Equations (IC
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.layers import trunc_normal_
 
 from .Basic import MLP, timestep_embedding
 from .FNO_Layers import (
@@ -34,6 +33,7 @@ class FNO(nn.Module):
     Output:
         out: [B, N, out_dim] - predicted flow
     """
+
     def __init__(
         self,
         space_dim=2,
@@ -43,12 +43,12 @@ class FNO(nn.Module):
         n_layers=4,
         modes=12,
         time_input=False,
-        geotype='unstructured',
+        geotype="unstructured",
         shapelist=None,
         padding=0,
     ):
         super().__init__()
-        self.__name__ = 'FNO'
+        self.__name__ = "FNO"
         self.space_dim = space_dim
         self.fun_dim = fun_dim
         self.out_dim = out_dim
@@ -62,18 +62,21 @@ class FNO(nn.Module):
 
         ## embedding
         self.preprocess = MLP(
-            fun_dim + space_dim, n_hidden * 2, n_hidden,
-            n_layers=0, res=False, act='gelu'
+            fun_dim + space_dim,
+            n_hidden * 2,
+            n_hidden,
+            n_layers=0,
+            res=False,
+            act="gelu",
         )
 
         if time_input:
             self.time_fc = nn.Sequential(
-                nn.Linear(n_hidden, n_hidden), nn.SiLU(),
-                nn.Linear(n_hidden, n_hidden)
+                nn.Linear(n_hidden, n_hidden), nn.SiLU(), nn.Linear(n_hidden, n_hidden)
             )
 
         # geometry projection
-        if self.geotype == 'unstructured':
+        if self.geotype == "unstructured":
             self.fftproject_in = SpectralConv2d_IrregularGeo(
                 n_hidden, n_hidden, modes, modes, self.shapelist[0], self.shapelist[1]
             )
@@ -81,21 +84,25 @@ class FNO(nn.Module):
                 n_hidden, n_hidden, modes, modes, self.shapelist[0], self.shapelist[1]
             )
             self.iphi = IPHI()
-            self.padding_list = [
-                (16 - size % 16) % 16 for size in self.shapelist
-            ]
+            self.padding_list = [(16 - size % 16) % 16 for size in self.shapelist]
         else:
             self.padding_list = [(16 - size % 16) % 16 for size in self.shapelist]
 
         # Fourier layers
-        self.conv_layers = nn.ModuleList([
-            BlockList[len(self.padding_list)](n_hidden, n_hidden, *[modes for _ in range(len(self.padding_list))])
-            for _ in range(n_layers)
-        ])
-        self.w_layers = nn.ModuleList([
-            ConvList[len(self.padding_list)](n_hidden, n_hidden, 1)
-            for _ in range(n_layers)
-        ])
+        self.conv_layers = nn.ModuleList(
+            [
+                BlockList[len(self.padding_list)](
+                    n_hidden, n_hidden, *[modes for _ in range(len(self.padding_list))]
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.w_layers = nn.ModuleList(
+            [
+                ConvList[len(self.padding_list)](n_hidden, n_hidden, 1)
+                for _ in range(n_layers)
+            ]
+        )
 
         # projectors
         self.fc1 = nn.Linear(n_hidden, n_hidden)
@@ -106,12 +113,13 @@ class FNO(nn.Module):
     def _initialize_weights(self):
         def _init_weights(m):
             if isinstance(m, nn.Linear):
-                trunc_normal_(m.weight, std=0.02)
+                nn.init.trunc_normal_(m.weight, std=0.02)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d)):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
+
         self.apply(_init_weights)
 
     def forward(self, x, fx=None, T=None):
@@ -144,8 +152,10 @@ class FNO(nn.Module):
             Time_emb = self.time_fc(Time_emb)
             fx = fx + Time_emb
 
-        if self.geotype == 'unstructured':
-            x = self.fftproject_in(fx.permute(0, 2, 1), x_in=original_pos, iphi=self.iphi, code=None)
+        if self.geotype == "unstructured":
+            x = self.fftproject_in(
+                fx.permute(0, 2, 1), x_in=original_pos, iphi=self.iphi, code=None
+            )
         else:
             B, N, _ = x.shape
             x = fx.permute(0, 2, 1).reshape(B, self.n_hidden, *self.shapelist)
@@ -153,7 +163,17 @@ class FNO(nn.Module):
                 if len(self.shapelist) == 2:
                     x = F.pad(x, [0, self.padding_list[1], 0, self.padding_list[0]])
                 elif len(self.shapelist) == 3:
-                    x = F.pad(x, [0, self.padding_list[2], 0, self.padding_list[1], 0, self.padding_list[0]])
+                    x = F.pad(
+                        x,
+                        [
+                            0,
+                            self.padding_list[2],
+                            0,
+                            self.padding_list[1],
+                            0,
+                            self.padding_list[0],
+                        ],
+                    )
 
         for i in range(self.n_layers):
             x1 = self.conv_layers[i](x)
@@ -161,14 +181,21 @@ class FNO(nn.Module):
             x = x1 + x2
             x = F.gelu(x)
 
-        if self.geotype == 'unstructured':
-            x = self.fftproject_out(x, x_out=original_pos, iphi=self.iphi, code=None).permute(0, 2, 1)
+        if self.geotype == "unstructured":
+            x = self.fftproject_out(
+                x, x_out=original_pos, iphi=self.iphi, code=None
+            ).permute(0, 2, 1)
         else:
             if not all(item == 0 for item in self.padding_list):
                 if len(self.shapelist) == 2:
-                    x = x[..., :-self.padding_list[0], :-self.padding_list[1]]
+                    x = x[..., : -self.padding_list[0], : -self.padding_list[1]]
                 elif len(self.shapelist) == 3:
-                    x = x[..., :-self.padding_list[0], :-self.padding_list[1], :-self.padding_list[2]]
+                    x = x[
+                        ...,
+                        : -self.padding_list[0],
+                        : -self.padding_list[1],
+                        : -self.padding_list[2],
+                    ]
             B = x.shape[0]
             x = x.reshape(B, self.n_hidden, -1).permute(0, 2, 1)
 
@@ -182,13 +209,13 @@ class FNO(nn.Module):
 class FNOLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.mse = nn.MSELoss(reduction='none')
+        self.mse = nn.MSELoss(reduction="none")
 
     def forward(self, pred, target):
         return self.mse(pred, target).mean()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     B, N = 2, 1000
 
     model = FNO(
@@ -198,7 +225,7 @@ if __name__ == '__main__':
         n_hidden=64,
         n_layers=4,
         modes=12,
-        geotype='unstructured',
+        geotype="unstructured",
         shapelist=[32, 32],
     )
 
