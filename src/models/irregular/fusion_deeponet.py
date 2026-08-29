@@ -26,11 +26,10 @@ intermediate size via a learnable linear layer applied per-node before pooling,
 so the model is resolution-invariant and works with any N.
 """
 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # Fused activation layer: tanh + sin mixture (mirrors JAX implementation)

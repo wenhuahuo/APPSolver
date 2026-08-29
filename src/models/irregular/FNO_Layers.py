@@ -2,11 +2,10 @@
 FNO Layers for Fourier Neural Operator
 """
 
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import math
 
 
 ################################################################
@@ -14,7 +13,7 @@ import math
 ################################################################
 class SpectralConv1d(nn.Module):
     def __init__(self, in_channels, out_channels, modes1):
-        super(SpectralConv1d, self).__init__()
+        super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.modes1 = modes1
@@ -40,7 +39,7 @@ class SpectralConv1d(nn.Module):
 ################################################################
 class SpectralConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2):
-        super(SpectralConv2d, self).__init__()
+        super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.modes1 = modes1
@@ -58,7 +57,7 @@ class SpectralConv2d(nn.Module):
     def forward(self, x):
         batchsize = x.shape[0]
         x_ft = torch.fft.rfft2(x)
-        out_ft = torch.zeros(batchsize, self.out_channels, x.size(-2), x.size(-1) // 2 + 1, 
+        out_ft = torch.zeros(batchsize, self.out_channels, x.size(-2), x.size(-1) // 2 + 1,
                            dtype=torch.cfloat, device=x.device)
         out_ft[:, :, :self.modes1, :self.modes2] = \
             self.compl_mul2d(x_ft[:, :, :self.modes1, :self.modes2], self.weights1)
@@ -73,7 +72,7 @@ class SpectralConv2d(nn.Module):
 ################################################################
 class SpectralConv3d(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2, modes3):
-        super(SpectralConv3d, self).__init__()
+        super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.modes1 = modes1
@@ -115,7 +114,7 @@ class SpectralConv3d(nn.Module):
 ################################################################
 class SpectralConv2d_IrregularGeo(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2, s1=32, s2=32):
-        super(SpectralConv2d_IrregularGeo, self).__init__()
+        super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.modes1 = modes1
@@ -214,8 +213,11 @@ class SpectralConv2d_IrregularGeo(nn.Module):
 
 
 class IPHI(nn.Module):
+    center: torch.Tensor
+    B: torch.Tensor
+
     def __init__(self, width=32):
-        super(IPHI, self).__init__()
+        super().__init__()
         self.width = width
         self.fc0 = nn.Linear(4, self.width)
         self.fc_code = nn.Linear(42, self.width)
@@ -233,7 +235,7 @@ class IPHI(nn.Module):
         # x: [b, n, 2] coordinates
         b, n, _ = x.shape
         device = x.device
-        
+
         angle = torch.atan2(x[:, :, 1] - self.center[:, :, 1], x[:, :, 0] - self.center[:, :, 0])
         radius = torch.norm(x - self.center, dim=-1, p=2)
         xd = torch.stack([x[:, :, 0], x[:, :, 1], angle, radius], dim=-1)  # [b, n, 4]
@@ -243,7 +245,7 @@ class IPHI(nn.Module):
         B_expanded = self.B.to(device).expand(1, 1, 4, self.width // 4)  # [1, 1, 4, width//4]
         x_sin = torch.sin(B_expanded * xd_sin).view(b, n, -1)  # [b, n, 4 * width//4]
         x_cos = torch.cos(B_expanded * xd_sin).view(b, n, -1)  # [b, n, 4 * width//4]
-        
+
         xd = self.fc0(xd)  # [b, n, width]
         xd = torch.cat([xd, x_sin, x_cos], dim=-1)  # [b, n, 3*width]
 

@@ -1,7 +1,6 @@
 """Controlled point-token-point model for tokenizer ablations."""
 
 import math
-from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -76,7 +75,7 @@ class PointTokenOperator(nn.Module):
         positions: torch.Tensor,
         token_ids: torch.Tensor,
         num_tokens: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size, n_points, width = features.shape
         index = token_ids.view(1, n_points, 1).expand(batch_size, -1, width)
         tokens = features.new_zeros(batch_size, num_tokens, width)
@@ -101,7 +100,7 @@ class PointTokenOperator(nn.Module):
         features: torch.Tensor,
         positions: torch.Tensor,
         num_tokens: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         queries = self.token_embed[:num_tokens]
         keys = self.assignment_key(features)
         temperature = self.temperature.clamp_min(0.05)
@@ -120,7 +119,7 @@ class PointTokenOperator(nn.Module):
         positions: torch.Tensor,
         flow: torch.Tensor,
         num_tokens: int,
-        token_ids: Optional[torch.Tensor] = None,
+        token_ids: torch.Tensor | None = None,
         return_diagnostics: bool = False,
     ):
         if num_tokens < 2 or num_tokens > self.max_tokens:
@@ -158,6 +157,7 @@ class PointTokenOperator(nn.Module):
             entropy = features.new_zeros(())
             confidence = features.new_ones(())
         else:
+            assert assignment is not None
             context = torch.einsum("bnp,bpd->bnd", assignment, encoded)
             entropy = -(
                 assignment.clamp_min(1e-12).log() * assignment
@@ -169,7 +169,7 @@ class PointTokenOperator(nn.Module):
         if not return_diagnostics:
             return prediction
 
-        diagnostics: Dict[str, torch.Tensor] = {
+        diagnostics: dict[str, torch.Tensor] = {
             "assignment_entropy": entropy.detach(),
             "assignment_confidence": confidence.detach(),
             "token_mass_min": mass.min().detach(),

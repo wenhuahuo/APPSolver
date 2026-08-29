@@ -13,7 +13,6 @@ Output shape: [B, P, N*C_out] - predicted flow at next timestep
 """
 
 
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -36,14 +35,14 @@ class Transformer(nn.Module):
     def __init__(
         self,
         in_flattened_dim: int,
-        out_flattened_dim: Optional[int] = None,
+        out_flattened_dim: int | None = None,
         d_model: int = 128,
         nhead: int = 4,
         num_layers: int = 3,
         dim_feedforward: int = 512,
         dropout: float = 0.1,
         max_patches: int = 10000,
-        params_dim: Optional[int] = None,
+        params_dim: int | None = None,
         condition_encoder: str = 'token',
     ):
         super().__init__()
@@ -88,14 +87,17 @@ class Transformer(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        for p in self.parameters():
+        # pos_embed keeps its trunc_normal_ initialization from __init__.
+        for name, p in self.named_parameters():
+            if name == 'pos_embed':
+                continue
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
     def forward(
         self,
         x: torch.Tensor,
-        params_embed: Optional[torch.Tensor] = None,
+        params_embed: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -248,14 +250,14 @@ class LearnedPatchTransformer(Transformer):
     def __init__(
         self,
         in_flattened_dim: int,
-        out_flattened_dim: Optional[int] = None,
+        out_flattened_dim: int | None = None,
         d_model: int = 128,
         nhead: int = 4,
         num_layers: int = 3,
         dim_feedforward: int = 512,
         dropout: float = 0.1,
         max_patches: int = 10000,
-        params_dim: Optional[int] = None,
+        params_dim: int | None = None,
         condition_encoder: str = 'token',
         slice_num: int = 32,
     ):
@@ -293,7 +295,7 @@ class TransformerLoss(nn.Module):
         self.use_mask = use_mask
         self.mse = nn.MSELoss(reduction='none')
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         loss = self.mse(pred, target)
 
         if self.use_mask and mask is not None:
@@ -309,28 +311,3 @@ class TransformerLoss(nn.Module):
             return loss.sum() / mask_float.sum().clamp_min(1.0)
 
         return loss.mean()
-
-
-if __name__ == '__main__':
-    B, P, NC = 4, 100, 96
-    in_flattened_dim = NC
-    out_flattened_dim = NC // 2
-
-    model = Transformer(
-        in_flattened_dim=in_flattened_dim,
-        out_flattened_dim=out_flattened_dim,
-        d_model=128,
-        nhead=4,
-        num_layers=3,
-    )
-
-    x = torch.randn(B, P, NC)
-    pred = model(x)
-
-    print(f"Input shape: {x.shape}")
-    print(f"Output shape: {pred.shape}")
-    print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
-
-    embed = torch.randn(B, 128)
-    pred_with_embed = model(x, params_embed=embed)
-    print(f"With embedding - Output shape: {pred_with_embed.shape}")

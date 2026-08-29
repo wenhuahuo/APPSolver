@@ -36,19 +36,18 @@ Reference:
 import hashlib
 import math
 import os
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple, Optional
-from scipy.spatial import cKDTree
-
+from scipy.spatial import KDTree
 
 # ---------------------------------------------------------------------------
 # Helpers – Fourier mode generation
 # ---------------------------------------------------------------------------
 
-def _compute_fourier_modes_2d(nks: List[int], Ls: List[float]) -> np.ndarray:
+def _compute_fourier_modes_2d(nks: list[int], Ls: list[float]) -> np.ndarray:
     """
     Build the canonical half-plane set of 2-D Fourier wavenumber pairs
     k = (2π/Lx · kx,  2π/Ly · ky),  sorted by |k|.
@@ -59,7 +58,7 @@ def _compute_fourier_modes_2d(nks: List[int], Ls: List[float]) -> np.ndarray:
     Lx, Ly = Ls
     pairs, mags = [], []
     for kx in range(-nx, nx + 1):
-        for ky in range(0, ny + 1):
+        for ky in range(ny + 1):
             if ky == 0 and kx <= 0:
                 continue
             k = np.array([2 * math.pi / Lx * kx, 2 * math.pi / Ly * ky])
@@ -70,7 +69,7 @@ def _compute_fourier_modes_2d(nks: List[int], Ls: List[float]) -> np.ndarray:
     return pairs[order]
 
 
-def compute_fourier_modes(ndims: int, nks: List[int], Ls: List[float]) -> np.ndarray:
+def compute_fourier_modes(ndims: int, nks: list[int], Ls: list[float]) -> np.ndarray:
     """
     Compute `nmeasures` sets of Fourier modes.
 
@@ -100,7 +99,7 @@ def compute_fourier_modes(ndims: int, nks: List[int], Ls: List[float]) -> np.nda
 def compute_fourier_bases(
     nodes: torch.Tensor,   # (B, N, ndims)
     modes: torch.Tensor,   # (nmodes, ndims, nmeasures)
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute cos / sin / const Fourier bases.
 
@@ -125,8 +124,8 @@ def scaled_sigmoid(x: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
 
 
 def scaled_logit(y: float, lo: float, hi: float) -> float:
-    y = torch.tensor(float(y))
-    return float(torch.log((y - lo) / (hi - y)))
+    value = torch.tensor(float(y))
+    return float(torch.log((value - lo) / (hi - value)))
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +230,7 @@ def compute_gradient(
 # ---------------------------------------------------------------------------
 
 class PCNO(nn.Module):
+    modes_base: torch.Tensor
     """
     Point Cloud Neural Operator (PCNO).
 
@@ -257,8 +257,8 @@ class PCNO(nn.Module):
         self,
         in_channels:        int   = 2,
         out_channels:       int   = 2,
-        modes:              np.ndarray = None,
-        layers:             List[int] = None,
+        modes:              np.ndarray | None = None,
+        layers:             list[int] | None = None,
         fc_dim:             int   = 128,
         nmeasures:          int   = 1,
         inv_L_scale_min:    float = 0.5,
@@ -300,15 +300,15 @@ class PCNO(nn.Module):
         # W + K + D layers
         self.sp_convs = nn.ModuleList([
             SpectralConv(in_sz, out_sz, modes_t)
-            for in_sz, out_sz in zip(layers, layers[1:])
+            for in_sz, out_sz in zip(layers, layers[1:], strict=True)
         ])
         self.ws = nn.ModuleList([
             nn.Conv1d(in_sz, out_sz, 1)
-            for in_sz, out_sz in zip(layers, layers[1:])
+            for in_sz, out_sz in zip(layers, layers[1:], strict=True)
         ])
         self.gws = nn.ModuleList([
             nn.Conv1d(2 * in_sz, out_sz, 1)   # gradient doubles channels
-            for in_sz, out_sz in zip(layers, layers[1:])
+            for in_sz, out_sz in zip(layers, layers[1:], strict=True)
         ])
 
         # Output projection
@@ -350,7 +350,7 @@ class PCNO(nn.Module):
         node_weights:          torch.Tensor,   # (B, N, nmeasures)
         directed_edges:        torch.Tensor,   # (B, E, 2)         int
         edge_gradient_weights: torch.Tensor,   # (B, E, 2)
-        node_mask:             Optional[torch.Tensor] = None,  # (B, N, 1) or None
+        node_mask:             torch.Tensor | None = None,  # (B, N, 1) or None
     ) -> torch.Tensor:
         """
         Returns predicted flow field: (B, N, out_channels)
@@ -371,7 +371,7 @@ class PCNO(nn.Module):
 
         # 3. Operator layers
         n_layers = len(self.ws)
-        for i, (sp, w, gw) in enumerate(zip(self.sp_convs, self.ws, self.gws)):
+        for i, (sp, w, gw) in enumerate(zip(self.sp_convs, self.ws, self.gws, strict=True)):
             x1 = sp(x, bases_c, bases_s, bases_0, wbases_c, wbases_s, wbases_0)
             x2 = w(x)
             x3 = gw(self.softsign(compute_gradient(x, directed_edges, edge_gradient_weights)))
@@ -398,7 +398,7 @@ class PCNO(nn.Module):
 # ---------------------------------------------------------------------------
 
 class PCNOLoss(nn.Module):
-    """Relative L2 loss (matches original LpLoss with p=2)."""
+    """Masked MSE loss; use :meth:`relative_l2` for the relative-L2 metric."""
 
     def __init__(self, reduction: str = 'mean'):
         super().__init__()
@@ -445,11 +445,12 @@ def build_aux_from_pos(
         edge_gradient_weights  : (E, 2)            float32
     """
     N = pos.shape[0]
-    tree = cKDTree(pos)
 
     # k+1 because query includes the node itself (distance 0)
     k = min(k_neighbors + 1, N)
-    dists, indices = tree.query(pos, k=k)   # (N, k)
+    # pi-lens-ignore: python-sql-injection (scipy KD-tree nearest-neighbor query)
+    dists, indices = KDTree(pos).query(pos, k=k)   # (N, k)
+    indices = np.asarray(indices)
 
     # ------------------------------------------------------------------
     # Node weights: Shepard-style area estimate, normalised
@@ -484,7 +485,7 @@ def build_aux_from_pos(
         U, S, Vt = np.linalg.svd(dx, full_matrices=False)
         rcond = np.where(S[:, 0] > 0, 1e-3 * S[:, 0], 1e-12)
         S_inv = np.zeros_like(S)
-        np.divide(1.0, S, out=S_inv, where=S > rcond[:, None])
+        np.divide(1.0, S, out=S_inv, where=rcond[:, None] < S)
         pinvdx = (Vt.transpose(0, 2, 1) * S_inv[:, None, :]) @ U.transpose(0, 2, 1)
         edge_gradient_weights[
             start * neighbor_count:stop * neighbor_count
@@ -579,7 +580,7 @@ def load_pcno_aux_cache(
     return aux
 
 
-def collate_aux_batch(aux_list: List[dict]) -> dict:
+def collate_aux_batch(aux_list: list[dict]) -> dict:
     """
     Pad and stack a list of per-sample aux dicts into batch tensors.
 

@@ -5,31 +5,20 @@ Based on: https://github.com/thuml/Neural-Solver-Library
 Paper: Universal Physics Transformers: A Framework For Efficiently Scaling Neural Operators (NeurIPS 2024)
 """
 
-import math
-import torch
-import torch.nn as nn
-import numpy as np
-from einops import rearrange
 from functools import partial
 
+import torch
+import torch.nn as nn
 from kappamodules.layers import ContinuousSincosEmbed, LinearProjection
-from kappamodules.transformer import PerceiverPoolingBlock, Mlp, PerceiverBlock, DitBlock, PrenormBlock
+from kappamodules.transformer import (
+    DitBlock,
+    Mlp,
+    PerceiverBlock,
+    PerceiverPoolingBlock,
+    PrenormBlock,
+)
 
-
-def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
-    """
-    Create sinusoidal timestep embeddings.
-    """
-    half = dim // 2
-    freqs = torch.exp(
-        -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-    ).to(device=timesteps.device)
-    args = timesteps[:, None].float() * freqs[None]
-    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    if dim % 2:
-        embedding = torch.cat([embedding, torch.zeros_like(embedding[:,:,:1])], dim=-1)
-    return embedding
-
+from .Basic import timestep_embedding
 
 ################################################################
 # UPT Mesh Encoder
@@ -44,18 +33,18 @@ class RansPerceiver_Encoder(nn.Module):
             add_type_token=False,
             init_weights="xavier_uniform",
             init_last_proj_zero=False,
-            input_shape=None,
+            input_shape: tuple | None = None,
             fun_dim=0,
             time_input=False,
             n_hidden=256,
-            **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__()
         self.dim = dim
         self.num_attn_heads = num_attn_heads
         self.num_output_tokens = num_output_tokens
         self.add_type_token = add_type_token
         self.input_shape = input_shape
+        assert self.input_shape is not None
         self.fun_dim = fun_dim
         self.time_input = time_input
 
@@ -75,10 +64,10 @@ class RansPerceiver_Encoder(nn.Module):
             dim=dim,
             num_heads=num_attn_heads,
             num_query_tokens=num_output_tokens,
-            perceiver_kwargs=dict(
-                init_weights=init_weights,
-                init_last_proj_zero=init_last_proj_zero,
-            ),
+            perceiver_kwargs={
+                'init_weights': init_weights,
+                'init_last_proj_zero': init_last_proj_zero,
+            },
         )
 
         if add_type_token:
@@ -100,7 +89,7 @@ class RansPerceiver_Encoder(nn.Module):
 
         if self.fun_dim != 0 and fx is not None:
             x = torch.cat([x, fx], dim=-1)
-        
+
         mask = None
 
         if T is not None and self.time_input:
@@ -132,11 +121,10 @@ class TransformerModel(nn.Module):
             drop_path_decay=True,
             init_weights="xavier_uniform",
             init_last_proj_zero=False,
-            input_shape=None,
+            input_shape: tuple | None = None,
             condition_dim=None,
-            **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__()
         self.dim = dim
         self.depth = depth
         self.num_attn_heads = num_attn_heads
@@ -147,6 +135,7 @@ class TransformerModel(nn.Module):
         self.input_shape = input_shape
         self.condition_dim = condition_dim
 
+        assert self.input_shape is not None
         assert len(self.input_shape) == 2
         seqlen, input_dim = self.input_shape
         self.output_shape = (seqlen, dim)
@@ -184,7 +173,7 @@ class TransformerModel(nn.Module):
         x = self.input_proj(x)
 
         # apply blocks
-        blk_kwargs = dict(cond=condition) if condition is not None else dict()
+        blk_kwargs = {'cond': condition} if condition is not None else {}
         for blk in self.blocks:
             x = blk(x, **blk_kwargs)
 
@@ -208,25 +197,26 @@ class RansPerceiver_Decoder(nn.Module):
             init_weights="xavier_uniform",
             init_last_proj_zero=False,
             use_last_norm=False,
-            input_shape=None,
-            ndim=None,
-            output_shape=None,
+            input_shape: tuple | None = None,
+            ndim: int | None = None,
+            output_shape: tuple | None = None,
             fun_dim=0,
             time_input=False,
             n_hidden=256,
-            **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__()
         self.dim = dim
         self.num_attn_heads = num_attn_heads
         self.use_last_norm = use_last_norm
         self.input_shape = input_shape
+        assert ndim is not None
         self.ndim = ndim - fun_dim
         self.output_shape = output_shape
         self.fun_dim = fun_dim
         self.time_input = time_input
 
         # input projection
+        assert self.input_shape is not None
         _, input_dim = self.input_shape
         self.proj = LinearProjection(input_dim, dim, init_weights=init_weights)
 
@@ -244,6 +234,7 @@ class RansPerceiver_Decoder(nn.Module):
             init_last_proj_zero=init_last_proj_zero,
             init_weights=init_weights,
         )
+        assert self.output_shape is not None
         _, output_dim = self.output_shape
         self.norm = nn.LayerNorm(dim, eps=1e-6) if use_last_norm else nn.Identity()
         self.pred = LinearProjection(dim, output_dim, init_weights=init_weights)
@@ -285,12 +276,12 @@ class RansPerceiver_Decoder(nn.Module):
 class UPT(nn.Module):
     """
     Universal Physics Transformer for irregular mesh PDE solving.
-    
+
     Input:
         x: [B, N, space_dim] - coordinates
         fx: [B, N, fun_dim] - flow features (optional)
         T: [B] - time step (optional, for temporal tasks)
-    
+
     Output:
         out: [B, N, out_dim] - predicted flow
     """
@@ -368,12 +359,12 @@ class UPT(nn.Module):
     def forward(self, x, fx=None, T=None):
         """
         Forward pass for unstructured geometry.
-        
+
         Args:
             x: [B, N, space_dim] coordinates
             fx: [B, N, fun_dim] flow features
             T: [B] time step (optional)
-        
+
         Returns:
             out: [B, N, out_dim] predicted flow
         """
@@ -405,7 +396,7 @@ class UPTLoss(nn.Module):
 
 if __name__ == '__main__':
     B, N = 2, 1000
-    
+
     model = UPT(
         space_dim=2,
         fun_dim=4,
@@ -415,12 +406,12 @@ if __name__ == '__main__':
         n_layers=3,
         num_output_tokens=32,
     )
-    
+
     x = torch.randn(B, N, 2)  # coordinates
     fx = torch.randn(B, N, 4)  # flow features
-    
+
     out = model(x, fx)
-    
+
     print(f"Input x shape: {x.shape}")
     print(f"Input fx shape: {fx.shape}")
     print(f"Output shape: {out.shape}")

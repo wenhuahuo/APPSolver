@@ -1,7 +1,16 @@
 {
   "rules": {
     "unchecked-throwing-call-python": {
-      "disable": ["unchecked-throwing-call-python", "ast-grep:unchecked-throwing-call-python"]
+      "disable": [
+        "unchecked-throwing-call-python",
+        "ast-grep:unchecked-throwing-call-python"
+      ]
+    },
+    "python-sql-injection": {
+      "disable": [
+        "python-sql-injection",
+        "opengrep:python-sql-injection"
+      ]
     }
   }
 }

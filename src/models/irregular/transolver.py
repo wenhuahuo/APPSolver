@@ -12,16 +12,9 @@ Output shape: [B, N, C] - predicted flow at next timestep
 
 import torch
 import torch.nn as nn
-import numpy as np
 from einops import rearrange
 
-
-def timestep_embedding(timesteps, dim, max_period=10000):
-    half = dim // 2
-    freqs = torch.exp(-np.log(max_period) * torch.arange(half, device=timesteps.device) / half)
-    args = timesteps[:, None].float() * freqs[None]
-    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    return embedding
+from .Basic import MLP
 
 
 class PhysicsAttentionIrregularMesh(nn.Module):
@@ -38,8 +31,8 @@ class PhysicsAttentionIrregularMesh(nn.Module):
         self.in_project_x = nn.Linear(dim, inner_dim)
         self.in_project_fx = nn.Linear(dim, inner_dim)
         self.in_project_slice = nn.Linear(dim_head, slice_num)
-        for l in [self.in_project_slice]:
-            torch.nn.init.orthogonal_(l.weight)
+        for layer in [self.in_project_slice]:
+            torch.nn.init.orthogonal_(layer.weight)
         self.to_q = nn.Linear(dim_head, dim_head, bias=False)
         self.to_k = nn.Linear(dim_head, dim_head, bias=False)
         self.to_v = nn.Linear(dim_head, dim_head, bias=False)
@@ -71,44 +64,6 @@ class PhysicsAttentionIrregularMesh(nn.Module):
         out_x = torch.einsum("bhgc,bhng->bhnc", out_slice_token, slice_weights)
         out_x = rearrange(out_x, 'b h n d -> b n (h d)')
         return self.to_out(out_x)
-
-
-ACTIVATION = {
-    'gelu': nn.GELU, 'tanh': nn.Tanh, 'sigmoid': nn.Sigmoid, 'relu': nn.ReLU,
-    'leaky_relu': nn.LeakyReLU(0.1), 'softplus': nn.Softplus, 'ELU': nn.ELU, 'silu': nn.SiLU
-}
-
-
-class MLP(nn.Module):
-    def __init__(self, n_input, n_hidden, n_output, n_layers=1, act='gelu', res=True):
-        super(MLP, self).__init__()
-
-        if act in ACTIVATION.keys():
-            act_fn = ACTIVATION[act]
-        else:
-            raise NotImplementedError(f"Activation {act} not supported")
-        
-        self.n_input = n_input
-        self.n_hidden = n_hidden
-        self.n_output = n_output
-        self.n_layers = n_layers
-        self.res = res
-        
-        self.linear_pre = nn.Sequential(nn.Linear(n_input, n_hidden), act_fn())
-        self.linear_post = nn.Linear(n_hidden, n_output)
-        self.linears = nn.ModuleList([
-            nn.Sequential(nn.Linear(n_hidden, n_hidden), act_fn()) for _ in range(n_layers)
-        ])
-
-    def forward(self, x):
-        x = self.linear_pre(x)
-        for i in range(self.n_layers):
-            if self.res:
-                x = self.linears[i](x) + x
-            else:
-                x = self.linears[i](x)
-        x = self.linear_post(x)
-        return x
 
 
 class TransolverBlock(nn.Module):
@@ -166,7 +121,7 @@ class Transolver(nn.Module):
         self.unified_pos = unified_pos
         self.n_hidden = n_hidden
         self.space_dim = space_dim
-        
+
         if self.unified_pos:
             self.preprocess = MLP(fun_dim + self.ref * self.ref, n_hidden * 2, n_hidden, n_layers=0, res=False, act=act)
         else:
@@ -184,7 +139,7 @@ class Transolver(nn.Module):
             )
             for _ in range(n_layers)
         ])
-        
+
         self._initialize_weights()
         self.placeholder = nn.Parameter((1 / n_hidden) * torch.rand(n_hidden, dtype=torch.float))
 
@@ -197,7 +152,7 @@ class Transolver(nn.Module):
             elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d)):
                 nn.init.constant_(m.bias, 0)
                 nn.init.constant_(m.weight, 1.0)
-        
+
         self.apply(_init_weights)
 
     def get_grid(self, x, batchsize=1):
@@ -214,13 +169,13 @@ class Transolver(nn.Module):
     def forward(self, x, fx):
         if self.unified_pos:
             x = self.get_grid(x, x.shape[0])
-        
+
         if fx is not None:
             fx = torch.cat((x, fx), -1)
             fx = self.preprocess(fx)
         else:
             fx = self.preprocess(x)
-        
+
         fx = fx + self.placeholder[None, None, :]
 
         for block in self.blocks:
@@ -240,7 +195,7 @@ class TransolverLoss(nn.Module):
 
 if __name__ == '__main__':
     B, N, C = 2, 1000, 6
-    
+
     model = Transolver(
         space_dim=2,
         n_layers=5,
@@ -255,12 +210,12 @@ if __name__ == '__main__':
         ref=8,
         unified_pos=False
     )
-    
+
     pos = torch.randn(B, N, 2)
     flow = torch.randn(B, N, 4)
-    
+
     out = model(pos, flow)
-    
+
     print(f"Input pos shape: {pos.shape}")
     print(f"Input flow shape: {flow.shape}")
     print(f"Output shape: {out.shape}")

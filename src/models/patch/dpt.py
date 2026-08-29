@@ -35,14 +35,12 @@ Interface (matches CFDBenchPatchDataset / PatchFlowFieldDataset):
                              internally but available for loss masking)
 """
 
-import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Optional, Tuple
 
 from .condition_encoders import build_condition_encoder
-
 
 # ============================================================
 # 1.  Transformer building blocks
@@ -115,7 +113,7 @@ class PatchEmbedding(nn.Module):
     """
 
     def __init__(self, flattened_dim: int, d_model: int, max_patches: int = 1024,
-                 dropout: float = 0.0, params_dim: Optional[int] = None,
+                 dropout: float = 0.0, params_dim: int | None = None,
                  condition_encoder: str = 'token'):
         super().__init__()
         self.proj    = nn.Linear(flattened_dim, d_model)
@@ -139,11 +137,13 @@ class PatchEmbedding(nn.Module):
         self.max_patches = max_patches
         self.d_model = d_model
 
-    def forward(self, x: torch.Tensor, params_embed: torch.Tensor = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, params_embed: torch.Tensor | None = None
+    ) -> torch.Tensor:
         B, P, _ = x.shape
         x = self.proj(x)                            # (B, P, d_model)
 
-        if P <= self.max_patches:
+        if self.max_patches >= P:
             pos = self.pos_emb[:, :P, :]
         else:
             pos = F.interpolate(
@@ -164,14 +164,16 @@ class PatchEmbedding(nn.Module):
                 )
 
             if self.condition_encoder_type == 'film':
+                assert self.condition_module is not None
                 gamma, beta = self.condition_module(params_embed)
                 x = x * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
             else:
-                condition_token = (
-                    self.params_proj(params_embed)
-                    if self.condition_encoder_type == 'token'
-                    else self.condition_module(params_embed)
-                )
+                if self.condition_encoder_type == 'token':
+                    assert self.params_proj is not None
+                    condition_token = self.params_proj(params_embed)
+                else:
+                    assert self.condition_module is not None
+                    condition_token = self.condition_module(params_embed)
                 x = torch.cat([condition_token.unsqueeze(1), x], dim=1)
 
         return x
@@ -195,7 +197,7 @@ class ViTEncoder(nn.Module):
 
     def __init__(self, d_model: int, n_heads: int, n_layers: int,
                  mlp_ratio: float = 4.0, dropout: float = 0.0,
-                 hooks: Optional[List[int]] = None):
+                 hooks: list[int] | None = None):
         super().__init__()
         self.blocks = nn.ModuleList([
             TransformerBlock(d_model, n_heads, mlp_ratio, dropout)
@@ -214,7 +216,7 @@ class ViTEncoder(nn.Module):
                 hooks = [q - 1, 2 * q - 1, 3 * q - 1, n_layers - 1]
         self.hooks = hooks
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """
         Returns the 4 intermediate activations at self.hooks,
         as well as the final normalised output.
@@ -347,7 +349,7 @@ class FeatureFusionBlock1D(nn.Module):
         self.out_proj = nn.Linear(features, out_features)
 
     def forward(self, x: torch.Tensor,
-                skip: Optional[torch.Tensor] = None) -> torch.Tensor:
+                skip: torch.Tensor | None = None) -> torch.Tensor:
         """
         x    : (B, P, features)  – current (deeper) feature map
         skip : (B, P, features)  – optional feature from the shallower level
@@ -383,7 +385,7 @@ class Scratch1D(nn.Module):
     output_conv: (B, P_out, features) → (B, P_out, out_dim)  via Linear
     """
 
-    def __init__(self, in_shapes: List[int], features: int,
+    def __init__(self, in_shapes: list[int], features: int,
                  out_dim: int, use_bn: bool = False):
         super().__init__()
         self.layer1_rn = nn.Linear(in_shapes[0], features)
@@ -453,7 +455,7 @@ class DPT(nn.Module):
     def __init__(
         self,
         in_flattened_dim: int,
-        out_flattened_dim: Optional[int] = None,
+        out_flattened_dim: int | None = None,
         features:      int   = 256,
         d_model:       int   = 256,
         n_heads:       int   = 8,
@@ -461,9 +463,9 @@ class DPT(nn.Module):
         mlp_ratio:     float = 4.0,
         dropout:       float = 0.1,
         use_bn:        bool  = False,
-        hooks:         Optional[List[int]] = None,
+        hooks:         list[int] | None = None,
         max_patches:   int   = 1024,
-        params_dim:    Optional[int] = None,
+        params_dim:    int | None = None,
         condition_encoder: str = 'token',
     ):
         super().__init__()
@@ -537,8 +539,8 @@ class DPT(nn.Module):
     def forward(
         self,
         x:    torch.Tensor,                         # (B, P, N*C)
-        mask: Optional[torch.Tensor] = None,        # (B, P, N) – unused internally
-        params_embed: Optional[torch.Tensor] = None, # (B, params_dim) – optional
+        mask: torch.Tensor | None = None,        # (B, P, N) – unused internally
+        params_embed: torch.Tensor | None = None, # (B, params_dim) – optional
     ) -> torch.Tensor:
         """
         Args:
@@ -613,7 +615,7 @@ class DPTLoss(nn.Module):
         self,
         pred:   torch.Tensor,                       # (B, P, N*C)
         target: torch.Tensor,                       # (B, P, N*C)
-        mask:   Optional[torch.Tensor] = None,      # (B, P, N) bool
+        mask:   torch.Tensor | None = None,      # (B, P, N) bool
     ) -> torch.Tensor:
         """
         If mask is provided, expand it to match N*C features and compute
