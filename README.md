@@ -33,7 +33,6 @@ APPsolver/
 │   ├── train_irregular_pcno.py
 │   ├── evaluate_*.py
 │   └── slurm/
-├── vis/
 ├── requirements.txt
 └── README.md
 ```
@@ -45,7 +44,6 @@ Main code modules:
 - `src/models/`: APP patch models and irregular baseline models
 - `src/core/`: training, metrics, and checkpoint utilities
 - `scripts/`: training, evaluation, and experiment entry points
-- `vis/`: visualization scripts and generated figures
 
 ## Environment Setup
 

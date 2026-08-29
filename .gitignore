@@ -4,9 +4,9 @@ runs/
 logs/
 artifacts/
 tmp/
-tmp/
 docs/
 vis/
+apps/
 .ai_context/
 **/*.sh
 
