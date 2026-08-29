@@ -171,13 +171,9 @@ def main():
             'median_ms': float(np.median(samples)),
             'mean_ms': float(np.mean(samples)),
             'std_ms': float(np.std(samples)),
-            # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
             'q25_ms': float(np.quantile(samples, 0.25)),
-            # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
             'q75_ms': float(np.quantile(samples, 0.75)),
-            # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
             'min_ms': float(np.min(samples)),
-            # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
             'max_ms': float(np.max(samples)),
         }
         records.append(record)
