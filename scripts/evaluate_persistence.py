@@ -6,14 +6,11 @@ import json
 import os
 import sys
 
-import torch
-
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 from src.core.metrics import MetricsCalculator
 from src.datasets.shipBench import MultiConditionIrregularDataset
 from src.datasets.temporal import save_data_protocol
-
 
 CHANNELS = ['u', 'v', 'w', 'p_rgh']
 
@@ -51,13 +48,8 @@ def main():
         seed=args.seed,
         rollout_holdout_steps=args.rollout_holdout_steps,
     )
-    test_dataset = MultiConditionIrregularDataset(
-        data_dirs=args.data_dirs,
-        split='test',
-        train_ratio=args.train_ratio,
-        seed=args.seed,
-        rollout_holdout_steps=args.rollout_holdout_steps,
-        normalization_params=train_dataset.get_normalization_params(),
+    test_dataset = MultiConditionIrregularDataset.from_existing(
+        train_dataset, split='test'
     )
 
     os.makedirs(args.save_dir, exist_ok=True)
