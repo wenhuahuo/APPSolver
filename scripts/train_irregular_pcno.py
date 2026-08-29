@@ -3,12 +3,13 @@ Train PCNO (Point Cloud Neural Operator) on Irregular Mesh Flow Field Data.
 Supports both ship and CFDBench datasets, and multi-condition training.
 """
 
-import os
-import sys
 import argparse
 import csv
 import json
+import os
+import sys
 import time
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -16,16 +17,24 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-from src.datasets.shipBench import IrregularFlowFieldDataset, MultiConditionIrregularDataset
-from src.datasets.cfdBench import CFDBenchIrregularDataset, MultiConditionCFDBenchIrregularDataset
-from src.models.irregular.pcno import (
-    PCNO, PCNOLoss,
-    compute_fourier_modes, build_aux_from_pos, load_pcno_aux_cache,
-)
 from src.core.metrics import MetricsCalculator
+from src.datasets.cfdBench import (
+    CFDBenchIrregularDataset,
+    MultiConditionCFDBenchIrregularDataset,
+)
 from src.datasets.samplers import ConditionBatchSampler
+from src.datasets.shipBench import (
+    IrregularFlowFieldDataset,
+    MultiConditionIrregularDataset,
+)
 from src.datasets.temporal import save_data_protocol
-
+from src.models.irregular.pcno import (
+    PCNO,
+    PCNOLoss,
+    build_aux_from_pos,
+    compute_fourier_modes,
+    load_pcno_aux_cache,
+)
 
 # ---------------------------------------------------------------------------
 # Dataset wrapper: attaches precomputed aux to each sample
@@ -129,7 +138,7 @@ def set_seed(seed):
 
 def pcno_collate_fn(batch):
     """Stack one same-condition batch and retain its geometry identifier."""
-    pos_list, fx_list, y_list, condition_ids = zip(*batch)
+    pos_list, fx_list, y_list, condition_ids = zip(*batch, strict=True)
     return (
         torch.stack(pos_list),
         torch.stack(fx_list),
@@ -186,8 +195,8 @@ def _append_metrics_csv(csv_path, row):
 # ---------------------------------------------------------------------------
 
 def train_epoch(
-    model, dataloader, criterion, optimizer, device, aux_by_condition,
-    disable_tqdm=False,
+    model, dataloader, criterion, optimizer, optimizer_inv_L, device,
+    aux_by_condition, disable_tqdm=False,
 ):
     model.train()
     total_loss = 0
@@ -205,6 +214,8 @@ def train_epoch(
         node_mask = aux['node_mask']
 
         optimizer.zero_grad(set_to_none=True)
+        if optimizer_inv_L:
+            optimizer_inv_L.zero_grad(set_to_none=True)
 
         pred = model(pos, fx, node_weights, directed_edges,
                      edge_gradient_weights, node_mask)
@@ -212,6 +223,8 @@ def train_epoch(
         loss = criterion(pred, target)
         loss.backward()
         optimizer.step()
+        if optimizer_inv_L:
+            optimizer_inv_L.step()
 
         total_loss += loss.item() * pos.size(0)
         n_samples  += pos.size(0)
@@ -288,7 +301,7 @@ def validate(
 
 def _parse_cfd_dirs(data_dirs):
     parts_list = [d.split('/') for d in data_dirs]
-    roots = ['/'.join(p[:-2]) if len(p) >= 2 else d for p, d in zip(parts_list, data_dirs)]
+    roots = ['/'.join(p[:-2]) if len(p) >= 2 else d for p, d in zip(parts_list, data_dirs, strict=True)]
     benchmarks = [p[-2] if len(p) >= 2 else '03_damflow' for p in parts_list]
     cases = [p[-1] if len(p) >= 1 else 'case0' for p in parts_list]
     return roots, benchmarks, cases
@@ -298,11 +311,11 @@ def _make_single_dataset(
     dataset_type, data_dir, step_size, train_ratio, seed, split,
     rollout_holdout_steps=0, normalization_params=None,
 ):
-    common = dict(
-        step_size=step_size, train_ratio=train_ratio, seed=seed, normalize=True,
-        rollout_holdout_steps=rollout_holdout_steps,
-        normalization_params=normalization_params,
-    )
+    common = {
+        'step_size': step_size, 'train_ratio': train_ratio, 'seed': seed,
+        'normalize': True, 'rollout_holdout_steps': rollout_holdout_steps,
+        'normalization_params': normalization_params,
+    }
     if dataset_type == 'ship':
         ds = IrregularFlowFieldDataset(data_dir=data_dir, **common)
     elif dataset_type == 'cfd_bench':
@@ -320,12 +333,12 @@ def _make_multi_dataset(
     dataset_type, data_dirs, step_size, train_ratio, seed, split,
     rollout_holdout_steps=0, normalization_params=None,
 ):
-    common = dict(
-        step_size=step_size, train_ratio=train_ratio, seed=seed,
-        normalize=True, split=split,
-        rollout_holdout_steps=rollout_holdout_steps,
-        normalization_params=normalization_params,
-    )
+    common = {
+        'step_size': step_size, 'train_ratio': train_ratio, 'seed': seed,
+        'normalize': True, 'split': split,
+        'rollout_holdout_steps': rollout_holdout_steps,
+        'normalization_params': normalization_params,
+    }
     if dataset_type == 'ship':
         return MultiConditionIrregularDataset(data_dirs=data_dirs, **common)
     if dataset_type == 'cfd_bench':
@@ -670,12 +683,9 @@ def main():
             print(f"\nEpoch {epoch+1}/{args.epochs}")
 
             train_loss = train_epoch(
-                model, train_loader, criterion, optimizer, device,
-                aux_by_condition, disable_tqdm=disable_tqdm,
+                model, train_loader, criterion, optimizer, optimizer_inv_L,
+                device, aux_by_condition, disable_tqdm=disable_tqdm,
             )
-            if optimizer_inv_L:
-                optimizer_inv_L.step()
-                optimizer_inv_L.zero_grad()
             print(f"Train Loss: {train_loss:.6f}")
 
             val_loss, val_metrics = validate(
