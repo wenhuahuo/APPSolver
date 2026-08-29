@@ -1,12 +1,10 @@
 """Point recovery and metrics for flow-field predictions."""
 
 import math
-from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 
-
-MetricValue = Union[float, List[float]]
+MetricValue = float | list[float]
 
 
 def patches_to_points(
@@ -17,7 +15,7 @@ def patches_to_points(
     n_channels: int,
     input_dim: int,
     max_points: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Convert flattened patches [B, P, N*C] back to points format [B, N, C].
 
@@ -49,7 +47,7 @@ def recover_points_knn(
     point_predictions: torch.Tensor,
     neighbor_indices: torch.Tensor,
     neighbor_weights: torch.Tensor,
-    sampled_indices: Optional[torch.Tensor] = None,
+    sampled_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Recover predictions at all points using a precomputed global k-NN map.
 
@@ -141,10 +139,6 @@ def recover_points_knn(
     return recovered.squeeze(0) if unbatched else recovered
 
 
-# Short, discoverable alias for callers that prefer the operation-first name.
-knn_recover = recover_points_knn
-
-
 class MetricsCalculator:
     """Accumulate pointwise errors over elements, rather than over batches."""
 
@@ -156,16 +150,16 @@ class MetricsCalculator:
         self.total_squared_error = 0.0
         self.total_target_squared = 0.0
         self.element_count = 0
-        self.channel_abs_error: Optional[List[float]] = None
-        self.channel_squared_error: Optional[List[float]] = None
-        self.channel_target_squared: Optional[List[float]] = None
+        self.channel_abs_error: list[float] | None = None
+        self.channel_squared_error: list[float] | None = None
+        self.channel_target_squared: list[float] | None = None
         self.point_count = 0
 
     def update(
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
     ) -> None:
         """Add ``[B, N, C]`` predictions, optionally at masked valid points."""
         if pred.shape != target.shape:
@@ -176,11 +170,14 @@ class MetricsCalculator:
         # A flattened tensor was accepted by the previous implementation and is
         # still used by one patch-evaluation path; treat it as a single channel.
         n_channels = pred.shape[-1] if pred.ndim > 1 else 1
-        if self.channel_abs_error is None:
-            self.channel_abs_error = [0.0] * n_channels
-            self.channel_squared_error = [0.0] * n_channels
-            self.channel_target_squared = [0.0] * n_channels
-        elif len(self.channel_abs_error) != n_channels:
+        channel_abs_state = self.channel_abs_error
+        channel_sq_state = self.channel_squared_error
+        channel_target_state = self.channel_target_squared
+        if channel_abs_state is None or channel_sq_state is None or channel_target_state is None:
+            channel_abs_state = [0.0] * n_channels
+            channel_sq_state = [0.0] * n_channels
+            channel_target_state = [0.0] * n_channels
+        elif len(channel_abs_state) != n_channels:
             raise ValueError("channel count changed between metric updates")
 
         error = (pred.detach() - target.detach()).reshape(-1, n_channels)
@@ -207,10 +204,10 @@ class MetricsCalculator:
         self.total_abs_error += sum(channel_abs)
         self.total_squared_error += sum(channel_squared)
         self.total_target_squared += sum(channel_target_squared)
-        self.channel_abs_error = [a + b for a, b in zip(self.channel_abs_error, channel_abs)]
-        self.channel_squared_error = [a + b for a, b in zip(self.channel_squared_error, channel_squared)]
+        self.channel_abs_error = [a + b for a, b in zip(channel_abs_state, channel_abs, strict=True)]
+        self.channel_squared_error = [a + b for a, b in zip(channel_sq_state, channel_squared, strict=True)]
         self.channel_target_squared = [
-            a + b for a, b in zip(self.channel_target_squared, channel_target_squared)
+            a + b for a, b in zip(channel_target_state, channel_target_squared, strict=True)
         ]
 
     @staticmethod
@@ -218,7 +215,7 @@ class MetricsCalculator:
         epsilon = 1e-12
         return math.sqrt(error_squared) / (math.sqrt(target_squared) + epsilon)
 
-    def compute(self) -> Dict[str, MetricValue]:
+    def compute(self) -> dict[str, MetricValue]:
         if self.element_count == 0:
             return {
                 "mae": 0.0,
@@ -248,7 +245,7 @@ class MetricsCalculator:
             "relative_l2_per_channel": [
                 self._relative_l2(error, target)
                 for error, target in zip(
-                    self.channel_squared_error, self.channel_target_squared
+                    self.channel_squared_error, self.channel_target_squared, strict=True
                 )
             ],
         }
@@ -257,8 +254,8 @@ class MetricsCalculator:
 def compute_metrics(
     pred: torch.Tensor,
     target: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
-) -> Dict[str, MetricValue]:
+    mask: torch.Tensor | None = None,
+) -> dict[str, MetricValue]:
     """Compute the same aggregate metrics as :class:`MetricsCalculator`."""
     calculator = MetricsCalculator()
     calculator.update(pred, target, mask)
