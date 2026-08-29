@@ -41,61 +41,66 @@ APP_METHODS = ['app_transformer', 'app_dpt']
 IRREGULAR_METHODS = ['transolver', 'upt', 'gnot', 'fno', 'fusion_deeponet', 'pcno']
 ALL_METHODS = APP_METHODS + IRREGULAR_METHODS + ['persistence']
 
-# Model hyperparameters must match scripts/slurm/rerun_shipbench_all_models_corrected_32k.sbatch
-PATCH_SIZE = 256
-DOWNSAMPLE_RATIO = 0.6
-APP_KWARGS = dict(d_model=56, nhead=4, n_heads=4, num_layers=4, features=96)
-PCNO_K_NEIGHBORS = 8
-PCNO_N_MODES = 4
+IRREGULAR_MODELS = {
+    'transolver': Transolver,
+    'fno': FNO,
+    'fusion_deeponet': FusionDeepONet,
+    'upt': UPT,
+    'gnot': GNOT,
+}
 
 
 # ---------------------------------------------------------------------------
-# Model construction (kwargs mirror the training scripts' defaults)
+# Model construction from the training run manifest
 # ---------------------------------------------------------------------------
 
-def build_app_model(method, global_shape, dpt_max_patches):
+def load_run_config(save_dir):
+    config_path = os.path.join(save_dir, 'run_config.json')
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(
+            f'Missing {config_path}; rollout evaluation builds models from the '
+            'training run manifest'
+        )
+    with open(config_path, encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+def build_app_model(method, run_args, global_shape, dpt_max_patches):
     in_dim = global_shape['max_points'] * global_shape['input_dim']
     out_dim = global_shape['max_points'] * global_shape['output_dim']
+    params_dim = run_args['embedding_dim'] if run_args.get('use_embedding') else None
     if method == 'app_transformer':
         return Transformer(
             in_flattened_dim=in_dim, out_flattened_dim=out_dim,
-            d_model=APP_KWARGS['d_model'], nhead=APP_KWARGS['nhead'],
-            num_layers=APP_KWARGS['num_layers'], params_dim=None,
+            d_model=run_args['d_model'], nhead=run_args['nhead'],
+            num_layers=run_args['num_layers'], params_dim=params_dim,
         )
     return DPT(
         in_flattened_dim=in_dim, out_flattened_dim=out_dim,
-        features=APP_KWARGS['features'], d_model=APP_KWARGS['d_model'],
-        n_heads=APP_KWARGS['n_heads'], n_layers=APP_KWARGS['num_layers'],
-        max_patches=dpt_max_patches, params_dim=None,
+        features=run_args['features'], d_model=run_args['d_model'],
+        n_heads=run_args['n_heads'], n_layers=run_args['num_layers'],
+        max_patches=dpt_max_patches, params_dim=params_dim,
+        condition_encoder=run_args.get('condition_encoder', 'token'),
     )
 
 
-def build_irregular_model(
-    method, n_channels, fourier_modes, slice_num=32, num_output_tokens=64,
-):
-    if method == 'transolver':
-        return Transolver(space_dim=2, unified_pos=False, fun_dim=n_channels,
-                          out_dim=n_channels, n_layers=5, n_hidden=160, dropout=0.0,
-                          n_head=4, act='gelu', mlp_ratio=2,
-                          slice_num=slice_num, ref=8)
-    if method == 'fno':
-        return FNO(space_dim=2, geotype='unstructured', shapelist=[32, 32],
-                   fun_dim=n_channels, out_dim=n_channels,
-                   n_hidden=32, n_layers=5, modes=8)
-    if method == 'fusion_deeponet':
-        return FusionDeepONet(coord_dim=2, in_channels=n_channels, out_channels=n_channels,
-                              hidden_dim=288, n_layers=5, G_dim=112)
-    if method == 'upt':
-        return UPT(space_dim=2, fun_dim=n_channels, out_dim=n_channels,
-                   n_hidden=128, n_heads=4, n_layers=2,
-                   num_output_tokens=num_output_tokens)
-    if method == 'gnot':
-        return GNOT(space_dim=2, fun_dim=n_channels, out_dim=n_channels,
-                    n_hidden=112, n_heads=4, n_layers=2, mlp_ratio=2, n_experts=3)
+def build_irregular_model(method, run_config, n_channels, fourier_modes):
     if method == 'pcno':
-        return PCNO(in_channels=n_channels, out_channels=n_channels, modes=fourier_modes,
-                    layers=[64, 64, 64, 64], fc_dim=0, nmeasures=1)
-    raise ValueError(f'Unknown irregular method: {method}')
+        # PCNO is trained by train_irregular_pcno.py, whose manifest stores the
+        # CLI args; Fourier modes are geometry-derived and recomputed here.
+        run_args = run_config['args']
+        return PCNO(
+            in_channels=n_channels, out_channels=n_channels,
+            modes=fourier_modes, layers=run_args['layers'],
+            fc_dim=run_args['fc_dim'], nmeasures=run_args['nmeasures'],
+        )
+    model_kwargs = run_config['resolved_model_kwargs']
+    if model_kwargs.get('fun_dim') not in (None, n_channels):
+        raise ValueError(
+            f'Condition channel mismatch for {method}: manifest has '
+            f"fun_dim={model_kwargs['fun_dim']}, dataset has {n_channels}"
+        )
+    return IRREGULAR_MODELS[method](**model_kwargs)
 
 
 def load_checkpoint(model, ckpt_path, device):
@@ -105,26 +110,22 @@ def load_checkpoint(model, ckpt_path, device):
 
 
 def validate_run_provenance(
-    save_dir, method, model_seed, split_seed, data_dirs,
-    rollout_holdout_steps, slice_num, num_output_tokens, dataset,
+    save_dir, config, model_seed, split_seed, data_dirs,
+    rollout_holdout_steps, dataset,
 ):
     config_path = os.path.join(save_dir, 'run_config.json')
-    if not os.path.isfile(config_path):
-        return None
-    with open(config_path, encoding='utf-8') as handle:
-        config = json.load(handle)
-    if config.get('model_seed') != model_seed or config.get('split_seed') != split_seed:
-        raise ValueError(f'Seed mismatch between evaluator and {config_path}')
+    if config.get('model_seed') != model_seed:
+        raise ValueError(f'Model seed mismatch between evaluator and {config_path}')
+    # train_irregular.py stores 'split_seed' while train_patch.py and
+    # train_irregular_pcno.py store 'resolved_split_seed'.
+    run_split_seed = config.get('split_seed', config.get('resolved_split_seed'))
+    if run_split_seed != split_seed:
+        raise ValueError(f'Split seed mismatch between evaluator and {config_path}')
     run_args = config['args']
     if run_args['data_dirs'] != data_dirs:
         raise ValueError(f'Data directory mismatch for {config_path}')
     if run_args['rollout_holdout_steps'] != rollout_holdout_steps:
         raise ValueError(f'Rollout holdout mismatch for {config_path}')
-    resolved = config['resolved_model_kwargs']
-    if method == 'transolver' and resolved['slice_num'] != slice_num:
-        raise ValueError(f'Transolver slice_num mismatch for {config_path}')
-    if method == 'upt' and resolved['num_output_tokens'] != num_output_tokens:
-        raise ValueError(f'UPT token-count mismatch for {config_path}')
 
     stats_path = os.path.join(save_dir, 'normalization_stats.npz')
     saved_stats = np.load(stats_path)
@@ -176,7 +177,7 @@ def _normalize(values, mean, std):
 
 
 @torch.inference_mode()
-def rollout_irregular(model, method, test_dataset, horizon, device):
+def rollout_irregular(model, method, test_dataset, horizon, device, k_neighbors=8):
     flow_mean = torch.from_numpy(test_dataset.normalization_params['flow_mean']).float()
     flow_std = torch.from_numpy(test_dataset.normalization_params['flow_std']).float()
     coord_mean = torch.from_numpy(test_dataset.normalization_params['coord_mean']).float()
@@ -194,7 +195,7 @@ def rollout_irregular(model, method, test_dataset, horizon, device):
             )
         pcno_aux = None
         if method == 'pcno':
-            aux = build_aux_from_pos(sub_ds.coords[0], k_neighbors=PCNO_K_NEIGHBORS,
+            aux = build_aux_from_pos(sub_ds.coords[0], k_neighbors=k_neighbors,
                                      nmeasures=1)
             pcno_aux = {
                 key: value.to(device)
@@ -336,14 +337,10 @@ def main():
                         help='Model checkpoint seed')
     parser.add_argument('--split_seed', type=int, default=None,
                         help='Dataset split/rollout seed (default: --seed)')
-    parser.add_argument('--slice_num', type=int, default=32)
-    parser.add_argument('--num_output_tokens', type=int, default=64)
     parser.add_argument('--rollout_holdout_steps', type=int, default=50)
     parser.add_argument('--device', type=str, default='cpu')
     args = parser.parse_args()
 
-    if args.slice_num < 1 or args.num_output_tokens < 1:
-        raise ValueError('slice_num and num_output_tokens must be positive')
     split_seed = args.seed if args.split_seed is None else args.split_seed
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
@@ -364,28 +361,21 @@ def main():
     patch_test = None
     patch_shape = None
     if need_app:
+        app_config = load_run_config(
+            os.path.join(args.run_root, 'app_transformer', f'seed{args.seed}'))
+        app_args = app_config['args']
         train_patch = MultiConditionPatchDataset(
-            data_dirs=args.data_dirs, split='train', patch_size=PATCH_SIZE,
-            enable_downsample=True, downsample_method='distance',
-            downsample_ratio=DOWNSAMPLE_RATIO, train_ratio=args.train_ratio,
+            data_dirs=args.data_dirs, split='train',
+            patch_size=app_args['patch_size'],
+            enable_downsample=True,
+            downsample_method=app_args['downsample_method'],
+            downsample_ratio=app_args['downsample_ratio'],
+            train_ratio=args.train_ratio,
             seed=split_seed, rollout_holdout_steps=args.rollout_holdout_steps,
         )
         patch_shape = train_patch.get_global_shape()
         patch_test = MultiConditionPatchDataset.from_existing(
             train_patch, split='test'
-        )
-
-    fourier_modes = None
-    if 'pcno' in methods:
-        mins = np.full(2, np.inf)
-        maxs = np.full(2, -np.inf)
-        for sub_ds in irregular_test.sub_datasets:
-            pos = sub_ds.coords[0]
-            mins = np.minimum(mins, pos.min(axis=0))
-            maxs = np.maximum(maxs, pos.max(axis=0))
-        lengths = (maxs - mins) + 1e-6
-        fourier_modes = compute_fourier_modes(
-            2, [PCNO_N_MODES] * 2, lengths.tolist()
         )
 
     checkpoint_name = (
@@ -396,52 +386,80 @@ def main():
     for method in methods:
         save_dir = os.path.join(args.run_root, method, f'seed{args.seed}')
         print(f'\n=== {method} ===')
+        ckpt = os.path.join(save_dir, checkpoint_name)
+        provenance = None
         if method == 'persistence':
             results = rollout_persistence(irregular_test, args.horizon)
-        elif method in APP_METHODS:
-            ckpt = os.path.join(save_dir, checkpoint_name)
-            # train_patch.py uses num_patches * 2 for DPT positional embeddings
-            # in single-condition training and the global count otherwise.
-            dpt_max_patches = patch_shape['num_patches'] * (
-                2 if len(args.data_dirs) == 1 else 1)
-            model = load_checkpoint(
-                build_app_model(method, patch_shape, dpt_max_patches), ckpt, device)
-            results = rollout_app(model, method, patch_test, patch_shape,
-                                  args.horizon, device)
         else:
+            config = load_run_config(save_dir)
             provenance = validate_run_provenance(
-                save_dir, method, args.seed, split_seed, args.data_dirs,
-                args.rollout_holdout_steps, args.slice_num,
-                args.num_output_tokens, irregular_test,
+                save_dir, config, args.seed, split_seed, args.data_dirs,
+                args.rollout_holdout_steps,
+                patch_test if method in APP_METHODS else irregular_test,
             )
-            ckpt = os.path.join(save_dir, checkpoint_name)
-            n_channels = irregular_test.sub_datasets[0].n_channels
-            model = load_checkpoint(
-                build_irregular_model(
-                    method, n_channels, fourier_modes,
-                    slice_num=args.slice_num,
-                    num_output_tokens=args.num_output_tokens,
-                ),
-                ckpt,
-                device,
-            )
-            results = rollout_irregular(model, method, irregular_test,
-                                        args.horizon, device)
+            if method in APP_METHODS:
+                assert patch_shape is not None
+                # train_patch.py uses num_patches * 2 for DPT positional
+                # embeddings in single-condition training and the global
+                # count otherwise.
+                dpt_max_patches = patch_shape['num_patches'] * (
+                    2 if len(args.data_dirs) == 1 else 1)
+                model = load_checkpoint(
+                    build_app_model(method, config['args'], patch_shape,
+                                    dpt_max_patches),
+                    ckpt, device)
+                results = rollout_app(model, method, patch_test, patch_shape,
+                                      args.horizon, device)
+            elif method == 'pcno':
+                assert irregular_test is not None
+                run_args = config['args']
+                mins = np.full(2, np.inf)
+                maxs = np.full(2, -np.inf)
+                for sub_ds in irregular_test.sub_datasets:
+                    pos = sub_ds.coords[0]
+                    mins = np.minimum(mins, pos.min(axis=0))
+                    maxs = np.maximum(maxs, pos.max(axis=0))
+                fourier_modes = compute_fourier_modes(
+                    2, [run_args['n_modes']] * 2,
+                    ((maxs - mins) + 1e-6).tolist(),
+                )
+                n_channels = irregular_test.sub_datasets[0].n_channels
+                model = load_checkpoint(
+                    build_irregular_model(
+                        method, config, n_channels, fourier_modes),
+                    ckpt, device)
+                results = rollout_irregular(
+                    model, method, irregular_test, args.horizon, device,
+                    k_neighbors=run_args['k_neighbors'],
+                )
+            else:
+                assert irregular_test is not None
+                n_channels = irregular_test.sub_datasets[0].n_channels
+                model = load_checkpoint(
+                    build_irregular_model(
+                        method, config, n_channels, fourier_modes=None),
+                    ckpt, device,
+                )
+                results = rollout_irregular(model, method, irregular_test,
+                                            args.horizon, device)
 
         results['channels'] = CHANNELS
         results['checkpoint'] = args.checkpoint
-        if method not in APP_METHODS + ['persistence']:
+        if provenance is not None:
             results['provenance'] = provenance
+        # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
         os.makedirs(save_dir, exist_ok=True)
         json_path = os.path.join(
             save_dir, f'rollout_metrics{result_suffix}.json'
         )
+        # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
         with open(json_path, 'w', encoding='utf-8') as handle:
             json.dump(results, handle, indent=2)
 
         csv_path = os.path.join(
             save_dir, f'rollout_metrics{result_suffix}.csv'
         )
+        # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
         with open(csv_path, 'w', newline='', encoding='utf-8') as handle:
             writer = csv.DictWriter(
                 handle, fieldnames=['horizon', 'mae', 'mse', 'rmse', 'relative_l2'])

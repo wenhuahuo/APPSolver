@@ -15,17 +15,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 
 from scripts.evaluate_rollout import (
     APP_METHODS,
-    PCNO_K_NEIGHBORS,
-    PCNO_N_MODES,
-    PATCH_SIZE,
-    DOWNSAMPLE_RATIO,
     build_app_model,
     build_irregular_model,
     load_checkpoint,
+    load_run_config,
 )
-from src.datasets.shipBench import MultiConditionIrregularDataset, MultiConditionPatchDataset
-from src.models.irregular.pcno import build_aux_from_pos, collate_aux_batch, compute_fourier_modes
-
+from src.datasets.shipBench import (
+    MultiConditionIrregularDataset,
+    MultiConditionPatchDataset,
+)
+from src.models.irregular.pcno import (
+    build_aux_from_pos,
+    collate_aux_batch,
+    compute_fourier_modes,
+)
 
 METHODS = [
     'app_transformer', 'app_dpt', 'transolver', 'fno',
@@ -41,15 +44,31 @@ def measure_cuda(forward, warmup, repeats):
 
     starts = [torch.cuda.Event(enable_timing=True) for _ in range(repeats)]
     ends = [torch.cuda.Event(enable_timing=True) for _ in range(repeats)]
-    for start, end in zip(starts, ends):
+    for start, end in zip(starts, ends, strict=True):
         start.record()
         forward()
         end.record()
     torch.cuda.synchronize()
     return np.asarray(
-        [start.elapsed_time(end) for start, end in zip(starts, ends)],
+        [start.elapsed_time(end) for start, end in zip(starts, ends, strict=True)],
         dtype=np.float64,
     )
+
+
+def make_forward(model, method, pos, flow, patch_input, patch_mask, pcno_aux):
+    """Bind the batch-1 forward call for one model outside the timing loop."""
+    if method == 'app_dpt':
+        return lambda: model(patch_input, mask=patch_mask, params_embed=None)
+    if method in APP_METHODS:
+        return lambda: model(patch_input, params_embed=None)
+    if method == 'pcno':
+        return lambda: model(
+            pos, flow, pcno_aux['node_weights'],
+            pcno_aux['directed_edges'],
+            pcno_aux['edge_gradient_weights'],
+            pcno_aux['node_mask'],
+        )
+    return lambda: model(pos, flow)
 
 
 def main():
@@ -67,14 +86,23 @@ def main():
     device = torch.device('cuda')
     torch.manual_seed(42)
 
+    app_config = load_run_config(
+        os.path.join(args.run_root, 'app_transformer', 'seed42'))
+    pcno_config = load_run_config(
+        os.path.join(args.run_root, 'pcno', 'seed42'))
+    app_args = app_config['args']
+    pcno_args = pcno_config['args']
+
     irregular = MultiConditionIrregularDataset(
         data_dirs=args.data_dirs, split='train', seed=42,
         rollout_holdout_steps=50,
     )
     patch = MultiConditionPatchDataset(
-        data_dirs=args.data_dirs, split='train', patch_size=PATCH_SIZE,
-        enable_downsample=True, downsample_method='distance',
-        downsample_ratio=DOWNSAMPLE_RATIO, seed=42,
+        data_dirs=args.data_dirs, split='train',
+        patch_size=app_args['patch_size'],
+        enable_downsample=True,
+        downsample_method=app_args['downsample_method'],
+        downsample_ratio=app_args['downsample_ratio'], seed=42,
         rollout_holdout_steps=50,
     )
     patch_shape = patch.get_global_shape()
@@ -94,14 +122,14 @@ def main():
         mins = np.minimum(mins, ref_pos.min(axis=0))
         maxs = np.maximum(maxs, ref_pos.max(axis=0))
     fourier_modes = compute_fourier_modes(
-        2, [PCNO_N_MODES] * 2, ((maxs - mins) + 1e-6).tolist()
+        2, [pcno_args['n_modes']] * 2, ((maxs - mins) + 1e-6).tolist()
     )
     pcno_aux = {
         key: value.to(device)
         for key, value in collate_aux_batch([
             build_aux_from_pos(
                 irregular.sub_datasets[0].coords[0],
-                k_neighbors=PCNO_K_NEIGHBORS,
+                k_neighbors=pcno_args['k_neighbors'],
                 nmeasures=1,
             )
         ]).items()
@@ -109,37 +137,32 @@ def main():
 
     records = []
     for method in METHODS:
-        checkpoint = os.path.join(args.run_root, method, 'seed42', 'model_final.pth')
+        save_dir = os.path.join(args.run_root, method, 'seed42')
+        config = load_run_config(save_dir)
+        checkpoint = os.path.join(save_dir, 'model_final.pth')
         if method in APP_METHODS:
             model = load_checkpoint(
-                build_app_model(method, patch_shape, patch_shape['num_patches']),
+                build_app_model(
+                    method, config['args'], patch_shape,
+                    patch_shape['num_patches'],
+                ),
                 checkpoint,
                 device,
             )
-            if method == 'app_dpt':
-                forward = lambda: model(
-                    patch_input, mask=patch_mask, params_embed=None
-                )
-            else:
-                forward = lambda: model(patch_input, params_embed=None)
             input_units = patch_shape['num_patches']
         else:
             model = load_checkpoint(
-                build_irregular_model(method, irregular.n_channels, fourier_modes),
+                build_irregular_model(
+                    method, config, irregular.n_channels, fourier_modes
+                ),
                 checkpoint,
                 device,
             )
-            if method == 'pcno':
-                forward = lambda: model(
-                    pos, flow, pcno_aux['node_weights'],
-                    pcno_aux['directed_edges'],
-                    pcno_aux['edge_gradient_weights'],
-                    pcno_aux['node_mask'],
-                )
-            else:
-                forward = lambda: model(pos, flow)
             input_units = pos.shape[1]
 
+        forward = make_forward(
+            model, method, pos, flow, patch_input, patch_mask, pcno_aux
+        )
         samples = measure_cuda(forward, args.warmup, args.repeats)
         record = {
             'method': method,
@@ -148,9 +171,13 @@ def main():
             'median_ms': float(np.median(samples)),
             'mean_ms': float(np.mean(samples)),
             'std_ms': float(np.std(samples)),
+            # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
             'q25_ms': float(np.quantile(samples, 0.25)),
+            # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
             'q75_ms': float(np.quantile(samples, 0.75)),
+            # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
             'min_ms': float(np.min(samples)),
+            # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
             'max_ms': float(np.max(samples)),
         }
         records.append(record)
