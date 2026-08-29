@@ -1,10 +1,11 @@
 """Temporal split and training-only normalization utilities."""
 
-from dataclasses import dataclass
 import hashlib
 import json
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Any
 
 import numpy as np
 
@@ -76,7 +77,7 @@ def frame_indices_for_pairs(pair_indices: np.ndarray, step_size: int) -> np.ndar
     return np.unique(np.concatenate([pair_indices, pair_indices + step_size]))
 
 
-def compute_global_normalization_params(datasets: Iterable[object]) -> Dict[str, np.ndarray]:
+def compute_global_normalization_params(datasets: Iterable[Any]) -> dict[str, np.ndarray]:
     """Compute coordinate/flow Z-score parameters from training pairs only."""
     coord_sum = coord_sq_sum = flow_sum = flow_sq_sum = None
     coord_count = flow_count = 0
@@ -121,7 +122,7 @@ def compute_global_normalization_params(datasets: Iterable[object]) -> Dict[str,
     }
 
 
-def copy_normalization_params(params: Optional[Dict[str, np.ndarray]]):
+def copy_normalization_params(params: dict[str, np.ndarray] | None):
     if params is None:
         return None
     return {key: np.asarray(value, dtype=np.float32).copy() for key, value in params.items()}

@@ -1,12 +1,3 @@
-from .base import BaseDataset
-from .shipBench import (
-    IrregularFlowFieldDataset,
-    PatchFlowFieldDataset,
-    MultiConditionIrregularDataset,
-    MultiConditionPatchDataset,
-    create_irregular_dataloader,
-    create_patch_dataloader,
-)
 from .cfdBench import (
     CFDBenchIrregularDataset,
     CFDBenchPatchDataset,
@@ -15,9 +6,16 @@ from .cfdBench import (
     create_cfd_bench_irregular_dataloader,
     create_cfd_bench_patch_dataloader,
 )
+from .shipBench import (
+    IrregularFlowFieldDataset,
+    MultiConditionIrregularDataset,
+    MultiConditionPatchDataset,
+    PatchFlowFieldDataset,
+    create_irregular_dataloader,
+    create_patch_dataloader,
+)
 
 __all__ = [
-    'BaseDataset',
     'IrregularFlowFieldDataset',
     'PatchFlowFieldDataset',
     'MultiConditionIrregularDataset',

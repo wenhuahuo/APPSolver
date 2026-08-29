@@ -2,33 +2,42 @@
 船型流场数据集
 
 支持两种数据格式：
-1. Irregular格式：TransolverFlowFieldDataset - (B, N, C)
+1. Irregular格式：IrregularFlowFieldDataset - (B, N, C)
 2. Patch格式：PatchFlowFieldDataset - (B, C, P, N)
+
+Split/normalization/recovery plumbing lives in base.py; the protocol
+invariant is that normalization statistics always come from the training
+pairs of the temporal split only.
 """
 
-import copy
 import os
 import re
-from typing import List, Dict, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
 import yaml
-from torch.utils.data import Dataset, DataLoader
 from scipy.spatial import KDTree
+from torch.utils.data import DataLoader
 
-from .base import BaseDataset
+from ..data_processor.mesh_quad import QuadTreeMesh
+from .base import (
+    IrregularPairDataset,
+    MultiConditionIrregularDatasetMixin,
+    MultiConditionPatchDatasetMixin,
+    PatchPairDataset,
+)
 from .temporal import (
     compute_global_normalization_params,
     copy_normalization_params,
-    make_temporal_split,
     stable_condition_seed,
 )
-from ..data_processor.mesh_quad import QuadTreeMesh
-
 
 _TIMESTEP_RE = re.compile(r'^timestep_(\d+)\.csv$')
+
+DEFAULT_SHIP_CHANNELS = ['U:0', 'U:1', 'U:2', 'p_rgh']
+SHIP_COORD_CHANNELS = ['Center:0', 'Center:1', 'Center:2']
 
 
 def _timestep_sort_key(path: str) -> int:
@@ -39,17 +48,19 @@ def _timestep_sort_key(path: str) -> int:
 
 
 def _align_to_fixed_reference(
-    coords_3d: List[np.ndarray], flows: List[np.ndarray], k: int = 4
-) -> Tuple[np.ndarray, np.ndarray]:
+    coords_3d: list[np.ndarray], flows: list[np.ndarray], k: int = 4
+) -> tuple[np.ndarray, np.ndarray]:
     reference = coords_3d[0]
     aligned_flows = np.empty(
         (len(flows), len(reference), flows[0].shape[1]), dtype=np.float32
     )
     aligned_flows[0] = flows[0]
     for frame_id, (source_coords, source_flows) in enumerate(
-        zip(coords_3d[1:], flows[1:]), start=1
+        zip(coords_3d[1:], flows[1:], strict=True), start=1
     ):
+        # pi-lens-ignore: python-sql-injection
         distances, neighbors = KDTree(source_coords).query(reference, k=k)
+        neighbors = np.asarray(neighbors)
         exact = distances[:, 0] <= 1e-12
         aligned_flows[frame_id, exact] = source_flows[neighbors[exact, 0]]
         weights = 1.0 / np.maximum(distances[~exact], 1e-12)
@@ -63,11 +74,11 @@ def _align_to_fixed_reference(
     return fixed_coords, aligned_flows
 
 
-def _load_npz_cache(cache_path: str) -> Optional[Tuple[np.ndarray, np.ndarray, List[str]]]:
+def _load_npz_cache(cache_path: str) -> tuple[np.ndarray, np.ndarray, list[str]] | None:
     if not os.path.exists(cache_path):
         return None
 
-    data = np.load(cache_path, allow_pickle=True)
+    data = np.load(cache_path, allow_pickle=False)
     if 'coords' not in data or 'flows' not in data or 'channels' not in data:
         raise ValueError(f'Incomplete ShipBench cache: {cache_path}')
     if 'frame_indices' not in data:
@@ -148,7 +159,7 @@ def yaml_to_text(yaml_data: dict, parent_key: str = '') -> str:
     return ' '.join(lines)
 
 
-def yaml_to_numeric(yaml_data: dict) -> Tuple[List[str], np.ndarray]:
+def yaml_to_numeric(yaml_data: dict) -> tuple[list[str], np.ndarray]:
     values = []
 
     def visit(node, prefix=''):
@@ -168,7 +179,7 @@ def yaml_to_numeric(yaml_data: dict) -> Tuple[List[str], np.ndarray]:
     return keys, vector
 
 
-def find_ship_params_file(data_dir: str, params_path: Optional[str] = None) -> str:
+def find_ship_params_file(data_dir: str, params_path: str | None = None) -> str:
     if params_path is not None:
         if not os.path.isfile(params_path):
             raise FileNotFoundError(params_path)
@@ -186,6 +197,7 @@ def find_ship_params_file(data_dir: str, params_path: Optional[str] = None) -> s
 
 
 def copy_condition_normalization_params(params):
+    """Copy condition-stat dicts so callers cannot mutate dataset state."""
     if params is None:
         return None
     return {
@@ -195,7 +207,7 @@ def copy_condition_normalization_params(params):
     }
 
 
-class IrregularFlowFieldDataset(Dataset):
+class IrregularFlowFieldDataset(IrregularPairDataset):
     """
     Transolver格式的流场数据集 - Irregular输入
 
@@ -211,29 +223,33 @@ class IrregularFlowFieldDataset(Dataset):
         step_size: int = 1,
         train_ratio: float = 0.8,
         seed: int = 42,
-        output_channels: List[str] = None,
+        output_channels: list[str] | None = None,
         normalize: bool = True,
         prefer_cache: bool = True,
         cache_filename: str = 'flow_cache.npz',
         rollout_holdout_steps: int = 0,
-        normalization_params: Optional[Dict[str, np.ndarray]] = None,
+        normalization_params: dict[str, np.ndarray] | None = None,
+        _defer_normalization: bool = False,
     ):
         self.split = 'train'
-        self.step_size = step_size
-        self.train_ratio = train_ratio
-        self.seed = seed
-        self.split_seed = stable_condition_seed(seed, data_dir)
-        self.output_channels = output_channels or ['U:0', 'U:1', 'U:2', 'p_rgh']
-        self.coords_channels = ['Center:0', 'Center:1', 'Center:2']
         self.normalize = normalize
         self.prefer_cache = prefer_cache
         self.cache_filename = cache_filename
-        self.rollout_holdout_steps = rollout_holdout_steps
-        self._normalization_params = copy_normalization_params(normalization_params)
+        self.output_channels = output_channels or list(DEFAULT_SHIP_CHANNELS)
+        self.coords_channels = list(SHIP_COORD_CHANNELS)
+        self._init_temporal_pair(
+            step_size=step_size,
+            train_ratio=train_ratio,
+            split_seed=stable_condition_seed(seed, data_dir),
+            rollout_holdout_steps=rollout_holdout_steps,
+            normalization_params=normalization_params,
+            defer_normalization=_defer_normalization,
+        )
 
         self._load_from_csv(data_dir)
         self._split_data()
-        self._compute_normalization_params()
+        if not self._defer_normalization:
+            self._compute_normalization_params()
 
     def _load_from_csv(self, data_dir: str):
         if self.prefer_cache:
@@ -252,7 +268,6 @@ class IrregularFlowFieldDataset(Dataset):
                 self.coords = coords
                 self.flows = all_flows[:, :, indices]
                 self.data_dir = data_dir
-                self.n_timesteps = len(self.coords)
                 self.n_points = self.coords.shape[1]
                 self.n_channels = self.flows.shape[2]
                 return
@@ -270,12 +285,10 @@ class IrregularFlowFieldDataset(Dataset):
             ts_path = os.path.join(data_dir, ts_file)
             df = pd.read_csv(ts_path)
 
-            coords = np.column_stack([
-                df[col].values for col in self.coords_channels
-            ]).astype(np.float32)
+            coords = df[self.coords_channels].to_numpy(dtype=np.float32)
 
             flow_cols = [c for c in self.output_channels if c in df.columns]
-            flows = df[flow_cols].values.astype(np.float32)
+            flows = df[flow_cols].to_numpy(dtype=np.float32)
 
             coords_list.append(coords)
             flows_list.append(flows)
@@ -283,104 +296,11 @@ class IrregularFlowFieldDataset(Dataset):
         self.coords, self.flows = _align_to_fixed_reference(coords_list, flows_list)
 
         self.data_dir = data_dir
-        self.n_timesteps = len(self.coords)
         self.n_points = self.coords.shape[1]
         self.n_channels = self.flows.shape[2]
 
-    def _split_data(self):
-        if not hasattr(self, '_all_coords'):
-            self._all_coords = self.coords
-            self._all_flows = self.flows
-            self._original_n_timesteps = self.n_timesteps
-            self.temporal_split = make_temporal_split(
-                self.n_timesteps,
-                self.step_size,
-                self.train_ratio,
-                self.split_seed,
-                self.rollout_holdout_steps,
-            )
 
-        if self.split == 'train':
-            self.pair_indices = self.temporal_split.train
-        elif self.split == 'test':
-            self.pair_indices = self.temporal_split.test
-        elif self.split == 'all':
-            self.pair_indices = np.arange(
-                max(0, self._original_n_timesteps - self.step_size), dtype=np.int64
-            )
-        else:
-            raise ValueError(f"Unknown split: {self.split}")
-
-        self.coords = self._all_coords
-        self.flows = self._all_flows
-        self.n_timesteps = self._original_n_timesteps
-
-    def set_split(self, split: str):
-        self.split = split
-        self._split_data()
-
-    def clone_for_split(self, split: str):
-        dataset = copy.copy(self)
-        dataset.set_split(split)
-        return dataset
-
-    def set_normalization_params(self, params: Dict[str, np.ndarray]) -> None:
-        self._normalization_params = copy_normalization_params(params)
-        self._compute_normalization_params()
-
-    def _compute_normalization_params(self):
-        if not self.normalize:
-            self.coord_mean = self.coord_std = None
-            self.flow_mean = self.flow_std = None
-            return
-
-        params = self._normalization_params
-        if params is None:
-            params = compute_global_normalization_params([self])
-        self.coord_mean = params['coord_mean']
-        self.coord_std = params['coord_std']
-        self.flow_mean = params['flow_mean']
-        self.flow_std = params['flow_std']
-
-    def _normalize_coords(self, coords: np.ndarray) -> np.ndarray:
-        if not self.normalize:
-            return coords
-        return (coords - self.coord_mean) / self.coord_std
-
-    def _normalize_flows(self, flows: np.ndarray) -> np.ndarray:
-        if not self.normalize:
-            return flows
-        return (flows - self.flow_mean) / self.flow_std
-
-    def __len__(self) -> int:
-        return len(self.pair_indices)
-
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        time_idx = int(self.pair_indices[idx])
-        coords_t = self._all_coords[time_idx]
-        flow_t = self._all_flows[time_idx]
-        flow_tp1 = self._all_flows[time_idx + self.step_size]
-
-        pos = torch.from_numpy(self._normalize_coords(coords_t)).float()
-        fx = torch.from_numpy(self._normalize_flows(flow_t)).float()
-        y = torch.from_numpy(self._normalize_flows(flow_tp1)).float()
-
-        return pos, fx, y
-
-    def get_normalization_params(self) -> Dict[str, np.ndarray]:
-        return {
-            'coord_mean': self.coord_mean,
-            'coord_std': self.coord_std,
-            'flow_mean': self.flow_mean,
-            'flow_std': self.flow_std,
-        }
-
-    def get_rollout_sequence(self) -> Tuple[np.ndarray, np.ndarray]:
-        indices = self.temporal_split.rollout_frames
-        return self._all_coords[indices], self._all_flows[indices]
-
-
-class PatchFlowFieldDataset(Dataset):
+class PatchFlowFieldDataset(PatchPairDataset):
     """
     Patch格式的流场数据集 - Patch输入
 
@@ -397,7 +317,7 @@ class PatchFlowFieldDataset(Dataset):
         step_size: int = 1,
         patch_size: int = 64,
         ship_length: float = 7.0,
-        ref_point: Tuple[float, float] = (3.0, 0.0),
+        ref_point: tuple[float, float] = (3.0, 0.0),
         distance_threshold_1: float = 1.0,
         distance_threshold_2: float = 1.5,
         enable_distance_refine: bool = True,
@@ -411,18 +331,20 @@ class PatchFlowFieldDataset(Dataset):
         train_ratio: float = 0.8,
         seed: int = 42,
         enable_params: bool = False,
-        params_path: Optional[str] = None,
+        params_path: str | None = None,
         embedding_filename: str = 'ship_params_embedding.pt',
         embedding_mode: str = 'precomputed',
         zero_embedding_dim: int = 0,
         prefer_cache: bool = True,
         cache_filename: str = 'flow_cache.npz',
         rollout_holdout_steps: int = 0,
-        normalization_params: Optional[Dict[str, np.ndarray]] = None,
-        condition_normalization_params: Optional[Dict[str, np.ndarray]] = None,
+        normalization_params: dict[str, np.ndarray] | None = None,
+        condition_normalization_params: dict[str, np.ndarray] | None = None,
+        _defer_normalization: bool = False,
     ):
         self.data_dir = data_dir
-        self.step_size = step_size
+        self.split = split
+        self.normalize = normalize
         self.patch_size = patch_size
         self.ship_length = ship_length
         self.ref_point = ref_point
@@ -434,11 +356,6 @@ class PatchFlowFieldDataset(Dataset):
         self.downsample_ratio = downsample_ratio
         self.include_coordinates = include_coordinates
         self.output_dim = output_dim
-        self.normalize = normalize
-        self.split = split
-        self.train_ratio = train_ratio
-        self.seed = seed
-        self.split_seed = stable_condition_seed(seed, data_dir)
         self.enable_params = enable_params
         self.params_path = params_path
         self.embedding_filename = embedding_filename
@@ -446,10 +363,16 @@ class PatchFlowFieldDataset(Dataset):
         self.zero_embedding_dim = zero_embedding_dim
         self.prefer_cache = prefer_cache
         self.cache_filename = cache_filename
-        self.rollout_holdout_steps = rollout_holdout_steps
-        self._normalization_params = copy_normalization_params(normalization_params)
         self._condition_normalization_params = copy_condition_normalization_params(
             condition_normalization_params
+        )
+        self._init_temporal_pair(
+            step_size=step_size,
+            train_ratio=train_ratio,
+            split_seed=stable_condition_seed(seed, data_dir),
+            rollout_holdout_steps=rollout_holdout_steps,
+            normalization_params=normalization_params,
+            defer_normalization=_defer_normalization,
         )
 
         self.timestep_files = self._get_timestep_files()
@@ -457,12 +380,13 @@ class PatchFlowFieldDataset(Dataset):
         self._load_and_align_data()
         self._split_data()
         self._build_quadtree()
-        self._compute_normalization_params()
+        if not self._defer_normalization:
+            self._compute_normalization_params()
 
         if self.enable_params:
             self._load_ship_params()
 
-    def _get_timestep_files(self) -> List[str]:
+    def _get_timestep_files(self) -> list[str]:
         files = sorted(
             (f for f in os.listdir(self.data_dir)
              if f.startswith('timestep_') and f.endswith('.csv')),
@@ -470,22 +394,13 @@ class PatchFlowFieldDataset(Dataset):
         )
         return [os.path.join(self.data_dir, f) for f in files]
 
-    def _load_timestep(self, timestep_file: str) -> Tuple[np.ndarray, np.ndarray]:
+    def _load_timestep(self, timestep_file: str) -> tuple[np.ndarray, np.ndarray]:
         df = pd.read_csv(timestep_file)
 
-        coords = np.column_stack([
-            df['Center:0'].values,
-            df['Center:1'].values,
-            df['Center:2'].values,
-        ]).astype(np.float32)
+        coords = df[list(SHIP_COORD_CHANNELS)].to_numpy(dtype=np.float32)
 
-        flow_values = np.column_stack([
-            df['U:0'].values,
-            df['U:1'].values,
-            df['U:2'].values,
-            df['p_rgh'].values
-        ]).astype(np.float32)
-        flow_values = flow_values[:, :self.output_dim]
+        requested = DEFAULT_SHIP_CHANNELS[:self.output_dim]
+        flow_values = df[requested].to_numpy(dtype=np.float32)
 
         return coords, flow_values
 
@@ -493,12 +408,19 @@ class PatchFlowFieldDataset(Dataset):
         if self.prefer_cache:
             cached = _load_npz_cache(os.path.join(self.data_dir, self.cache_filename))
             if cached is not None:
-                coords, all_flows, _channel_names = cached
+                coords, all_flows, channel_names = cached
+                # Select cache channels by name, mirroring the irregular path.
+                requested = DEFAULT_SHIP_CHANNELS[:self.output_dim]
+                channel_to_idx = {name: i for i, name in enumerate(channel_names)}
+                missing = [name for name in requested if name not in channel_to_idx]
+                if missing:
+                    raise ValueError(
+                        f"Requested output channels missing from cache: {missing}; "
+                        f"available: {channel_names}"
+                    )
                 self.coords = coords
-                self.flows = all_flows[:, :, :self.output_dim]
-                self.num_timesteps = len(self.coords)
+                self.flows = all_flows[:, :, [channel_to_idx[c] for c in requested]]
                 self.num_points = self.coords.shape[1]
-                self.output_dim = self.flows.shape[2]
                 return
 
         all_coords = []
@@ -511,45 +433,7 @@ class PatchFlowFieldDataset(Dataset):
 
         self.coords, self.flows = _align_to_fixed_reference(all_coords, all_flows)
 
-        self.num_timesteps = len(self.coords)
         self.num_points = self.coords.shape[1]
-
-    def _split_data(self):
-        if not hasattr(self, '_all_coords'):
-            self._all_coords = self.coords
-            self._all_flows = self.flows
-            self._original_n_timesteps = self.num_timesteps
-            self.temporal_split = make_temporal_split(
-                self.num_timesteps,
-                self.step_size,
-                self.train_ratio,
-                self.split_seed,
-                self.rollout_holdout_steps,
-            )
-
-        if self.split == 'train':
-            self.pair_indices = self.temporal_split.train
-        elif self.split == 'test':
-            self.pair_indices = self.temporal_split.test
-        elif self.split == 'all':
-            self.pair_indices = np.arange(
-                max(0, self._original_n_timesteps - self.step_size), dtype=np.int64
-            )
-        else:
-            raise ValueError(f"Unknown split: {self.split}")
-
-        self.coords = self._all_coords
-        self.flows = self._all_flows
-        self.num_timesteps = self._original_n_timesteps
-
-    def set_split(self, split: str):
-        self.split = split
-        self._split_data()
-
-    def clone_for_split(self, split: str):
-        dataset = copy.copy(self)
-        dataset.set_split(split)
-        return dataset
 
     def _build_quadtree(self) -> None:
         self.quadtree = QuadTreeMesh(
@@ -578,53 +462,6 @@ class PatchFlowFieldDataset(Dataset):
         self.coord_dim = 2 if self.include_coordinates else 0
         self.input_dim = self.coord_dim + self.output_dim
 
-    def _build_recovery_map(self) -> None:
-        sampled = np.concatenate([patch.points for patch in self.quadtree.patches])
-        sampled = np.unique(sampled).astype(np.int64)
-        if len(sampled) < 4:
-            raise ValueError("APP recovery requires at least four sampled points")
-
-        full_coords = self._all_coords[0]
-        tree = KDTree(full_coords[sampled])
-        distances, compact_neighbors = tree.query(full_coords, k=4)
-        weights = 1.0 / np.maximum(distances, 1e-12)
-        weights /= weights.sum(axis=1, keepdims=True)
-
-        self.sampled_indices = torch.from_numpy(sampled).long()
-        self.recovery_indices = torch.from_numpy(sampled[compact_neighbors]).long()
-        self.recovery_weights = torch.from_numpy(weights.astype(np.float32))
-
-    def _build_patch_index(self) -> None:
-        self._patch_indices = np.zeros(
-            (self.num_patches, self.max_points), dtype=np.int64
-        )
-        self._patch_mask = np.zeros(
-            (self.num_patches, self.max_points), dtype=bool
-        )
-        for patch_idx, patch in enumerate(self.quadtree.patches):
-            n_points = len(patch.points)
-            self._patch_indices[patch_idx, :n_points] = patch.points
-            self._patch_mask[patch_idx, :n_points] = True
-        self._mask_tensor = torch.from_numpy(self._patch_mask)
-
-    def set_normalization_params(self, params: Dict[str, np.ndarray]) -> None:
-        self._normalization_params = copy_normalization_params(params)
-        self._compute_normalization_params()
-
-    def _compute_normalization_params(self) -> None:
-        if not self.normalize:
-            self.coord_mean = self.coord_std = None
-            self.flow_mean = self.flow_std = None
-            return
-
-        params = self._normalization_params
-        if params is None:
-            params = compute_global_normalization_params([self])
-        self.coord_mean = params['coord_mean']
-        self.coord_std = params['coord_std']
-        self.flow_mean = params['flow_mean']
-        self.flow_std = params['flow_std']
-
     def _load_ship_params(self) -> None:
         if self.embedding_mode == 'zero':
             if self.zero_embedding_dim <= 0:
@@ -638,7 +475,7 @@ class PatchFlowFieldDataset(Dataset):
             embedding_path = os.path.join(self.data_dir, self.embedding_filename)
             if not os.path.isfile(embedding_path):
                 raise FileNotFoundError(embedding_path)
-            data = torch.load(embedding_path, map_location='cpu')
+            data = torch.load(embedding_path, map_location='cpu', weights_only=True)
             self.params_embedding = data['embedding'].float()
             self.params_text = data.get('params_text', '')
             self.embedding_dim = self.params_embedding.shape[-1]
@@ -650,7 +487,7 @@ class PatchFlowFieldDataset(Dataset):
 
         if self.embedding_mode == 'numeric':
             yaml_path = find_ship_params_file(self.data_dir, self.params_path)
-            with open(yaml_path, 'r', encoding='utf-8') as handle:
+            with open(yaml_path, encoding='utf-8') as handle:
                 yaml_data = yaml.safe_load(handle)
             self.condition_keys, self.raw_params_vector = yaml_to_numeric(yaml_data)
             self.params_text = yaml_to_text(yaml_data)
@@ -668,7 +505,7 @@ class PatchFlowFieldDataset(Dataset):
         raise ValueError(f"Unknown embedding_mode: {self.embedding_mode}")
 
     def set_condition_normalization_params(
-        self, params: Dict[str, np.ndarray]
+        self, params: dict[str, np.ndarray]
     ) -> None:
         if self.embedding_mode != 'numeric':
             return
@@ -686,29 +523,18 @@ class PatchFlowFieldDataset(Dataset):
         self.params_embedding = torch.from_numpy(normalized.astype(np.float32))
 
     def get_condition_normalization_params(self):
-        return self._condition_normalization_params
+        return copy_condition_normalization_params(
+            self._condition_normalization_params
+        )
 
-    def get_params_embedding(self) -> Optional[torch.Tensor]:
+    def get_params_embedding(self) -> torch.Tensor | None:
         return getattr(self, 'params_embedding', None)
 
     def get_params_text(self) -> str:
         """Return the ship parameters as text description."""
         return getattr(self, 'params_text', '')
 
-    def _normalize_coords(self, coords: np.ndarray) -> np.ndarray:
-        if not self.normalize:
-            return coords
-        return (coords - self.coord_mean) / self.coord_std
-
-    def _normalize_flows(self, flows: np.ndarray) -> np.ndarray:
-        if not self.normalize:
-            return flows
-        return (flows - self.flow_mean) / self.flow_std
-
-    def __len__(self) -> int:
-        return len(self.pair_indices)
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         time_idx = int(self.pair_indices[idx])
         input_flows = self._all_flows[time_idx]
         output_flows = self._all_flows[time_idx + self.step_size]
@@ -723,7 +549,7 @@ class PatchFlowFieldDataset(Dataset):
 
         mask = self._create_mask()
 
-        result = {
+        result: dict[str, Any] = {
             'input': input_patches,
             'output': output_patches,
             'mask': mask,
@@ -741,38 +567,6 @@ class PatchFlowFieldDataset(Dataset):
 
         return result
 
-    def _extract_patches(self, coords: np.ndarray, flows: np.ndarray) -> torch.Tensor:
-        values = (
-            np.concatenate([coords, flows], axis=1)
-            if self.include_coordinates else flows
-        )
-        patches = values[self._patch_indices]
-        patches[~self._patch_mask] = 0.0
-        return torch.from_numpy(patches.reshape(self.num_patches, -1))
-
-    def _extract_flow_patches(self, flows: np.ndarray) -> torch.Tensor:
-        patches = flows[self._patch_indices]
-        patches[~self._patch_mask] = 0.0
-        return torch.from_numpy(patches.reshape(self.num_patches, -1))
-
-    def _create_mask(self) -> torch.Tensor:
-        return self._mask_tensor
-
-    def get_quadtree(self) -> QuadTreeMesh:
-        return self.quadtree
-
-    def get_normalization_params(self) -> Dict[str, np.ndarray]:
-        return {
-            'coord_mean': self.coord_mean,
-            'coord_std': self.coord_std,
-            'flow_mean': self.flow_mean,
-            'flow_std': self.flow_std,
-        }
-
-    def get_rollout_sequence(self) -> Tuple[np.ndarray, np.ndarray]:
-        indices = self.temporal_split.rollout_frames
-        return self._all_coords[indices], self._all_flows[indices]
-
 
 def create_irregular_dataloader(
     data_dir: str,
@@ -783,7 +577,7 @@ def create_irregular_dataloader(
     step_size: int = 1,
     train_ratio: float = 0.8,
     seed: int = 42,
-    output_channels: List[str] = None,
+    output_channels: list[str] | None = None,
 ) -> DataLoader:
     dataset = IrregularFlowFieldDataset(
         data_dir=data_dir,
@@ -805,6 +599,7 @@ def create_irregular_dataloader(
 
 def create_patch_dataloader(
     data_dir: str,
+    split: str = 'train',
     batch_size: int = 4,
     shuffle: bool = True,
     num_workers: int = 0,
@@ -814,6 +609,7 @@ def create_patch_dataloader(
 ) -> DataLoader:
     dataset = PatchFlowFieldDataset(
         data_dir=data_dir,
+        split=split,
         step_size=step_size,
         patch_size=patch_size,
         output_dim=output_dim,
@@ -828,7 +624,7 @@ def create_patch_dataloader(
     )
 
 
-class MultiConditionIrregularDataset(Dataset):
+class MultiConditionIrregularDataset(MultiConditionIrregularDatasetMixin):
     """
     多工况Irregular流场数据集
 
@@ -850,34 +646,36 @@ class MultiConditionIrregularDataset(Dataset):
 
     def __init__(
         self,
-        data_dirs: List[str],
+        data_dirs: list[str],
         step_size: int = 1,
         train_ratio: float = 0.8,
         seed: int = 42,
-        output_channels: List[str] = None,
+        output_channels: list[str] | None = None,
         normalize: bool = True,
         split: str = 'train',
-        max_points: Optional[int] = None,
+        max_points: int | None = None,
         rollout_holdout_steps: int = 0,
-        normalization_params: Optional[Dict[str, np.ndarray]] = None,
+        normalization_params: dict[str, np.ndarray] | None = None,
     ):
         self.data_dirs = data_dirs
         self.num_conditions = len(data_dirs)
 
-        shared_kwargs = dict(
-            step_size=step_size,
-            train_ratio=train_ratio,
-            output_channels=output_channels,
-            normalize=normalize,
-            rollout_holdout_steps=rollout_holdout_steps,
-            normalization_params=normalization_params,
-        )
+        # The wrapper computes global statistics itself when none are given.
+        defer_normalization = normalize and normalization_params is None
 
-        self.sub_datasets: List[IrregularFlowFieldDataset] = []
+        self.sub_datasets: list[IrregularFlowFieldDataset] = []
         for i, data_dir in enumerate(data_dirs):
             print(f"加载工况 {i} [{split}]: {data_dir}")
             ds = IrregularFlowFieldDataset(
-                data_dir=data_dir, seed=seed, **shared_kwargs
+                data_dir=data_dir,
+                seed=seed,
+                step_size=step_size,
+                train_ratio=train_ratio,
+                output_channels=output_channels,
+                normalize=normalize,
+                rollout_holdout_steps=rollout_holdout_steps,
+                normalization_params=normalization_params,
+                _defer_normalization=defer_normalization,
             )
             ds.set_split(split)
             self.sub_datasets.append(ds)
@@ -905,46 +703,8 @@ class MultiConditionIrregularDataset(Dataset):
             print(f"  工况 {i} ({os.path.basename(ds.data_dir)}): "
                   f"{len(ds)} 样本, {ds.n_points} points")
 
-    @classmethod
-    def from_existing(cls, source, split: str):
-        dataset = copy.copy(source)
-        dataset.sub_datasets = [
-            sub_dataset.clone_for_split(split)
-            for sub_dataset in source.sub_datasets
-        ]
-        dataset._build_index_map()
-        return dataset
 
-    def _build_index_map(self):
-        self._index_map: List[Tuple[int, int]] = []
-        for cond_id, ds in enumerate(self.sub_datasets):
-            for local_idx in range(len(ds)):
-                self._index_map.append((cond_id, local_idx))
-
-    def __len__(self) -> int:
-        return len(self._index_map)
-
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        cond_id, local_idx = self._index_map[idx]
-        sub_ds = self.sub_datasets[cond_id]
-
-        pos, fx, y = sub_ds[local_idx]
-        return pos, fx, y, torch.tensor(cond_id, dtype=torch.long)
-
-    def get_sub_dataset(self, condition_id: int) -> IrregularFlowFieldDataset:
-        return self.sub_datasets[condition_id]
-
-    def get_normalization_params(self) -> Dict[str, np.ndarray]:
-        return copy_normalization_params(self.normalization_params)
-
-    def get_global_shape(self) -> Dict[str, int]:
-        return {
-            'n_channels': self.n_channels,
-            'max_points': self.global_max_points,
-        }
-
-
-class MultiConditionPatchDataset(Dataset):
+class MultiConditionPatchDataset(MultiConditionPatchDatasetMixin):
     """
     多工况Patch流场数据集
 
@@ -962,11 +722,11 @@ class MultiConditionPatchDataset(Dataset):
 
     def __init__(
         self,
-        data_dirs: List[str],
+        data_dirs: list[str],
         step_size: int = 1,
         patch_size: int = 64,
         ship_length: float = 7.0,
-        ref_point: Tuple[float, float] = (3.0, 0.0),
+        ref_point: tuple[float, float] = (3.0, 0.0),
         distance_threshold_1: float = 1.0,
         distance_threshold_2: float = 1.5,
         enable_distance_refine: bool = True,
@@ -980,54 +740,56 @@ class MultiConditionPatchDataset(Dataset):
         train_ratio: float = 0.8,
         seed: int = 42,
         enable_params: bool = False,
-        params_path: Optional[str] = None,
+        params_path: str | None = None,
         embedding_filename: str = 'ship_params_embedding.pt',
         embedding_mode: str = 'precomputed',
         zero_embedding_dim: int = 0,
         prefer_cache: bool = True,
         cache_filename: str = 'flow_cache.npz',
-        max_patches: Optional[int] = None,
-        max_points: Optional[int] = None,
-        max_full_points: Optional[int] = None,
+        max_patches: int | None = None,
+        max_points: int | None = None,
+        max_full_points: int | None = None,
         rollout_holdout_steps: int = 0,
-        normalization_params: Optional[Dict[str, np.ndarray]] = None,
-        condition_normalization_params: Optional[Dict[str, np.ndarray]] = None,
+        normalization_params: dict[str, np.ndarray] | None = None,
+        condition_normalization_params: dict[str, np.ndarray] | None = None,
     ):
         self.data_dirs = data_dirs
         self.num_conditions = len(data_dirs)
 
-        shared_kwargs = dict(
-            step_size=step_size,
-            patch_size=patch_size,
-            ship_length=ship_length,
-            ref_point=ref_point,
-            distance_threshold_1=distance_threshold_1,
-            distance_threshold_2=distance_threshold_2,
-            enable_distance_refine=enable_distance_refine,
-            enable_downsample=enable_downsample,
-            downsample_method=downsample_method,
-            downsample_ratio=downsample_ratio,
-            include_coordinates=include_coordinates,
-            output_dim=output_dim,
-            normalize=normalize,
-            enable_params=enable_params,
-            params_path=params_path,
-            embedding_filename=embedding_filename,
-            embedding_mode=embedding_mode,
-            zero_embedding_dim=zero_embedding_dim,
-            prefer_cache=prefer_cache,
-            cache_filename=cache_filename,
-            rollout_holdout_steps=rollout_holdout_steps,
-            normalization_params=normalization_params,
-            condition_normalization_params=condition_normalization_params,
-        )
+        # The wrapper computes global statistics itself when none are given.
+        defer_normalization = normalize and normalization_params is None
 
-        self.sub_datasets: List[PatchFlowFieldDataset] = []
+        self.sub_datasets: list[PatchFlowFieldDataset] = []
         for i, data_dir in enumerate(data_dirs):
             print(f"加载工况 {i} [{split}]: {data_dir}")
             ds = PatchFlowFieldDataset(
-                data_dir=data_dir, split=split,
-                train_ratio=train_ratio, seed=seed, **shared_kwargs
+                data_dir=data_dir,
+                split=split,
+                seed=seed,
+                step_size=step_size,
+                patch_size=patch_size,
+                ship_length=ship_length,
+                ref_point=ref_point,
+                distance_threshold_1=distance_threshold_1,
+                distance_threshold_2=distance_threshold_2,
+                enable_distance_refine=enable_distance_refine,
+                enable_downsample=enable_downsample,
+                downsample_method=downsample_method,
+                downsample_ratio=downsample_ratio,
+                include_coordinates=include_coordinates,
+                output_dim=output_dim,
+                normalize=normalize,
+                enable_params=enable_params,
+                params_path=params_path,
+                embedding_filename=embedding_filename,
+                embedding_mode=embedding_mode,
+                zero_embedding_dim=zero_embedding_dim,
+                prefer_cache=prefer_cache,
+                cache_filename=cache_filename,
+                rollout_holdout_steps=rollout_holdout_steps,
+                normalization_params=normalization_params,
+                condition_normalization_params=condition_normalization_params,
+                _defer_normalization=defer_normalization,
             )
             self.sub_datasets.append(ds)
 
@@ -1105,100 +867,8 @@ class MultiConditionPatchDataset(Dataset):
             print(f"  工况 {i} ({os.path.basename(ds.data_dir)}): "
                   f"{len(ds)} 样本, {ds.num_patches} patches, {ds.max_points} max_points")
 
-    @classmethod
-    def from_existing(cls, source, split: str):
-        dataset = copy.copy(source)
-        dataset.sub_datasets = [
-            sub_dataset.clone_for_split(split)
-            for sub_dataset in source.sub_datasets
-        ]
-        dataset._build_index_map()
-        return dataset
-
-    def _build_index_map(self):
-        self._index_map: List[Tuple[int, int]] = []
-        for cond_id, ds in enumerate(self.sub_datasets):
-            for local_idx in range(len(ds)):
-                self._index_map.append((cond_id, local_idx))
-
-    def __len__(self) -> int:
-        return len(self._index_map)
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        cond_id, local_idx = self._index_map[idx]
-        sub_ds = self.sub_datasets[cond_id]
-
-        sample = sub_ds[local_idx]
-
-        orig_input = sample['input']
-        orig_output = sample['output']
-        orig_mask = sample['mask']
-
-        input_padded = torch.zeros(
-            (self.global_max_patches, self.global_max_points * self.input_dim),
-            dtype=torch.float32
-        )
-        output_padded = torch.zeros(
-            (self.global_max_patches, self.global_max_points * self.output_dim),
-            dtype=torch.float32
-        )
-        mask_padded = torch.zeros(
-            (self.global_max_patches, self.global_max_points),
-            dtype=torch.bool
-        )
-        p = orig_input.shape[0]
-        n = orig_mask.shape[1]
-        p_use = min(p, self.global_max_patches)
-        n_use = min(n, self.global_max_points)
-
-        input_padded[:p_use, :n_use * self.input_dim] = orig_input[:p_use, :n_use * self.input_dim]
-        output_padded[:p_use, :n_use * self.output_dim] = orig_output[:p_use, :n_use * self.output_dim]
-        mask_padded[:p_use, :n_use] = orig_mask[:p_use, :n_use]
-        result = {
-            'input': input_padded,
-            'output': output_padded,
-            'mask': mask_padded,
-            'condition_id': torch.tensor(cond_id, dtype=torch.long),
-            'time_index': sample['time_index'],
-        }
-        if 'full_target' in sample:
-            full_target_padded = torch.zeros(
-                (self.global_max_full_points, self.output_dim), dtype=torch.float32
-            )
-            full_point_mask = torch.zeros(
-                self.global_max_full_points, dtype=torch.bool
-            )
-            n_full = min(
-                sample['full_target'].shape[0], self.global_max_full_points
-            )
-            full_target_padded[:n_full] = sample['full_target'][:n_full]
-            full_point_mask[:n_full] = True
-            result['full_target'] = full_target_padded
-            result['full_point_mask'] = full_point_mask
-
-        if 'params_embedding' in sample:
-            result['params_embedding'] = sample['params_embedding']
-        if 'params_text' in sample:
-            result['params_text'] = sample['params_text']
-
-        return result
-
-    def get_sub_dataset(self, condition_id: int) -> PatchFlowFieldDataset:
-        return self.sub_datasets[condition_id]
-
-    def get_normalization_params(self) -> Dict[str, np.ndarray]:
-        return copy_normalization_params(self.normalization_params)
-
     def get_condition_normalization_params(self):
         return copy_condition_normalization_params(
             self.condition_normalization_params
         )
 
-    def get_global_shape(self) -> Dict[str, int]:
-        return {
-            'input_dim': self.input_dim,
-            'output_dim': self.output_dim,
-            'num_patches': self.global_max_patches,
-            'max_points': self.global_max_points,
-            'full_points': self.global_max_full_points,
-        }
