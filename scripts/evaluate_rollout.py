@@ -24,17 +24,23 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 from src.core.metrics import MetricsCalculator, patches_to_points, recover_points_knn
-from src.datasets.shipBench import MultiConditionIrregularDataset, MultiConditionPatchDataset
-from src.models.patch.transformer import Transformer
-from src.models.patch.dpt import DPT
-from src.models.irregular.transolver import Transolver
+from src.datasets.shipBench import (
+    MultiConditionIrregularDataset,
+    MultiConditionPatchDataset,
+)
 from src.models.irregular.fno import FNO
 from src.models.irregular.fusion_deeponet import FusionDeepONet
-from src.models.irregular.upt import UPT
 from src.models.irregular.gnot import GNOT
 from src.models.irregular.pcno import (
-    PCNO, build_aux_from_pos, collate_aux_batch, compute_fourier_modes,
+    PCNO,
+    build_aux_from_pos,
+    collate_aux_batch,
+    compute_fourier_modes,
 )
+from src.models.irregular.transolver import Transolver
+from src.models.irregular.upt import UPT
+from src.models.patch.dpt import DPT
+from src.models.patch.transformer import Transformer
 
 CHANNELS = ['u', 'v', 'w', 'p_rgh']
 APP_METHODS = ['app_transformer', 'app_dpt']
@@ -193,7 +199,7 @@ def rollout_irregular(model, method, test_dataset, horizon, device, k_neighbors=
             raise ValueError(
                 f'Rollout window has {len(coords)} frames, need {horizon + 1}'
             )
-        pcno_aux = None
+        pcno_aux = {}
         if method == 'pcno':
             aux = build_aux_from_pos(sub_ds.coords[0], k_neighbors=k_neighbors,
                                      nmeasures=1)
@@ -207,7 +213,7 @@ def rollout_irregular(model, method, test_dataset, horizon, device, k_neighbors=
             pos = _normalize(torch.from_numpy(coords[step]).float(), coord_mean, coord_std)
             pos = pos.unsqueeze(0).to(device)
             fx = flow_cur.unsqueeze(0).to(device)
-            if method == 'pcno':
+            if pcno_aux:
                 pred = model(pos, fx, pcno_aux['node_weights'],
                              pcno_aux['directed_edges'],
                              pcno_aux['edge_gradient_weights'],
@@ -447,19 +453,16 @@ def main():
         results['checkpoint'] = args.checkpoint
         if provenance is not None:
             results['provenance'] = provenance
-        # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
         os.makedirs(save_dir, exist_ok=True)
         json_path = os.path.join(
             save_dir, f'rollout_metrics{result_suffix}.json'
         )
-        # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
         with open(json_path, 'w', encoding='utf-8') as handle:
             json.dump(results, handle, indent=2)
 
         csv_path = os.path.join(
             save_dir, f'rollout_metrics{result_suffix}.csv'
         )
-        # pi-lens-ignore: ast-grep:unchecked-throwing-call-python
         with open(csv_path, 'w', newline='', encoding='utf-8') as handle:
             writer = csv.DictWriter(
                 handle, fieldnames=['horizon', 'mae', 'mse', 'rmse', 'relative_l2'])

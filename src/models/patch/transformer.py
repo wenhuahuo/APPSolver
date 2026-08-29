@@ -12,6 +12,9 @@ to the sequence.
 Output shape: [B, P, N*C_out] - predicted flow at next timestep
 """
 
+
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,22 +32,22 @@ class Transformer(nn.Module):
       -> [B, P, out_flattened_dim]. The parameter embedding is projected to
       d_model, prepended to the sequence, then removed from output.
     """
-    
+
     def __init__(
         self,
         in_flattened_dim: int,
-        out_flattened_dim: int = None,
+        out_flattened_dim: Optional[int] = None,
         d_model: int = 128,
         nhead: int = 4,
         num_layers: int = 3,
         dim_feedforward: int = 512,
         dropout: float = 0.1,
         max_patches: int = 10000,
-        params_dim: int = None,
+        params_dim: Optional[int] = None,
         condition_encoder: str = 'token',
     ):
         super().__init__()
-        
+
         if out_flattened_dim is None:
             out_flattened_dim = in_flattened_dim
 
@@ -53,7 +56,7 @@ class Transformer(nn.Module):
         self.d_model = d_model
         self.params_dim = params_dim
         self.condition_encoder_type = condition_encoder
-        
+
         self.input_proj = nn.Linear(in_flattened_dim, d_model)
         self.params_proj = None
         self.condition_module = None
@@ -70,7 +73,7 @@ class Transformer(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, max_patches, d_model))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         self.drop = nn.Dropout(dropout)
-        
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -79,20 +82,20 @@ class Transformer(nn.Module):
             batch_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
+
         self.output_proj = nn.Linear(d_model, out_flattened_dim)
-        
+
         self._init_weights()
-    
+
     def _init_weights(self):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
-    
+
     def forward(
         self,
         x: torch.Tensor,
-        params_embed: torch.Tensor = None,
+        params_embed: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -103,10 +106,10 @@ class Transformer(nn.Module):
             (B, P, out_flattened_dim) - predicted flow features
         """
         B, P, _ = x.shape
-        
+
         x_proj = self.input_proj(x)
-        
-        if P <= self.pos_embed.size(1):
+
+        if self.pos_embed.size(1) >= P:
             pos = self.pos_embed[:, :P, :]
         else:
             pos = F.interpolate(
@@ -115,10 +118,10 @@ class Transformer(nn.Module):
                 mode='linear',
                 align_corners=False,
             ).permute(0, 2, 1)
-        
+
         x_proj = x_proj + pos
         x_proj = self.drop(x_proj)
-        
+
         has_condition_token = False
         if params_embed is not None:
             if params_embed.dim() == 1:
@@ -130,24 +133,26 @@ class Transformer(nn.Module):
                 )
 
             if self.condition_encoder_type == 'film':
+                assert self.condition_module is not None
                 gamma, beta = self.condition_module(params_embed)
                 x_proj = x_proj * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
             else:
-                condition_token = (
-                    self.params_proj(params_embed)
-                    if self.condition_encoder_type == 'token'
-                    else self.condition_module(params_embed)
-                )
+                if self.condition_encoder_type == 'token':
+                    assert self.params_proj is not None
+                    condition_token = self.params_proj(params_embed)
+                else:
+                    assert self.condition_module is not None
+                    condition_token = self.condition_module(params_embed)
                 x_proj = torch.cat([condition_token.unsqueeze(1), x_proj], dim=1)
                 has_condition_token = True
-        
+
         x_trans = self.transformer(x_proj)
-        
+
         if has_condition_token:
             x_trans = x_trans[:, 1:, :]
-        
+
         x_out = self.output_proj(x_trans)
-        
+
         return x_out
 
 
@@ -243,14 +248,14 @@ class LearnedPatchTransformer(Transformer):
     def __init__(
         self,
         in_flattened_dim: int,
-        out_flattened_dim: int = None,
+        out_flattened_dim: Optional[int] = None,
         d_model: int = 128,
         nhead: int = 4,
         num_layers: int = 3,
         dim_feedforward: int = 512,
         dropout: float = 0.1,
         max_patches: int = 10000,
-        params_dim: int = None,
+        params_dim: Optional[int] = None,
         condition_encoder: str = 'token',
         slice_num: int = 32,
     ):
@@ -282,15 +287,15 @@ class LearnedPatchTransformer(Transformer):
 
 class TransformerLoss(nn.Module):
     """MSE loss with optional mask support."""
-    
+
     def __init__(self, use_mask: bool = True):
         super().__init__()
         self.use_mask = use_mask
         self.mse = nn.MSELoss(reduction='none')
-    
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         loss = self.mse(pred, target)
-        
+
         if self.use_mask and mask is not None:
             mask_float = mask.float()
             if mask_float.dim() == 2:
@@ -302,7 +307,7 @@ class TransformerLoss(nn.Module):
                 mask_float = mask_float.reshape(B, P, N * C)
             loss = loss * mask_float
             return loss.sum() / mask_float.sum().clamp_min(1.0)
-        
+
         return loss.mean()
 
 
@@ -310,7 +315,7 @@ if __name__ == '__main__':
     B, P, NC = 4, 100, 96
     in_flattened_dim = NC
     out_flattened_dim = NC // 2
-    
+
     model = Transformer(
         in_flattened_dim=in_flattened_dim,
         out_flattened_dim=out_flattened_dim,
@@ -318,14 +323,14 @@ if __name__ == '__main__':
         nhead=4,
         num_layers=3,
     )
-    
+
     x = torch.randn(B, P, NC)
     pred = model(x)
-    
+
     print(f"Input shape: {x.shape}")
     print(f"Output shape: {pred.shape}")
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
-    
+
     embed = torch.randn(B, 128)
     pred_with_embed = model(x, params_embed=embed)
     print(f"With embedding - Output shape: {pred_with_embed.shape}")
