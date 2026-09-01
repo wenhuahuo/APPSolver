@@ -54,7 +54,7 @@ conda create -n appsolver python=3.12 -y
 conda activate appsolver
 ```
 
-2. Install PyTorch first.
+1. Install PyTorch first.
 
 ```bash
 pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
@@ -66,7 +66,7 @@ or
 pip install torch==2.8.0+cu128 --index-url https://download.pytorch.org/whl/cu128
 ```
 
-3. Install the remaining dependencies.
+1. Install the remaining dependencies.
 
 ```bash
 pip install -r requirements.txt
@@ -187,4 +187,19 @@ python scripts/train_patch.py \
 
 ## Citation
 
-As my first paper, I want to summit it on arXiv, but I haven’t been endorsed by arXiv yet :melting_face: .
+This paper is now available on arXiv: [arXiv:2608.29355](https://arxiv.org/abs/2608.29355)
+
+If you find this work useful, please consider citing:
+
+```bibtex
+@misc{huo2026appsolver,
+      title         = {APPSolver: Adaptive Patch Partitioning for Point-Wise Ship Flow Prediction on Unstructured Meshes},
+      author        = {Wenhua Huo and Fenglei Han and Wangyuan Zhao and Xiao Peng and Chunhui Wang and Jialin Wu and Jiayi Han},
+      year          = {2026},
+      eprint        = {2608.29355},
+      archivePrefix = {arXiv},
+      primaryClass  = {cs.AI},
+      doi           = {10.48550/arXiv.2608.29355},
+      url           = {https://arxiv.org/abs/2608.29355}
+}
+```
